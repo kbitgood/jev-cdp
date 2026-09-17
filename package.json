@@ -1,0 +1,21 @@
+{
+  "name": "jev-browser-use",
+  "version": "0.1.0",
+  "description": "A Bun and TypeScript port of browser-use/jev-ultrafast.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kbitgood/jev-browser-use.git"
+  },
+  "scripts": {
+    "run": "bun src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}
