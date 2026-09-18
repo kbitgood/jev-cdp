@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "jev-browser-use",
+      "name": "jev-cdp",
       "devDependencies": {
         "@types/bun": "latest",
         "typescript": "latest",

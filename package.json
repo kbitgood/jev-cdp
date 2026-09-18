@@ -1,15 +1,17 @@
 {
-  "name": "jev-browser-use",
+  "name": "jev-cdp",
   "version": "0.1.0",
-  "description": "A Bun and TypeScript port of browser-use/jev-ultrafast.",
+  "description": "A small Jev-powered bridge to Chrome through the Chrome DevTools Protocol.",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kbitgood/jev-browser-use.git"
+    "url": "git+https://github.com/kbitgood/jev-cdp.git"
   },
   "scripts": {
     "run": "bun src/cli.ts",
+    "build": "bun build src/cli.ts --compile --outfile dist/jev-cdp",
+    "scenario:todo": "bun src/todo-scenario.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test"

@@ -17,6 +17,10 @@ export interface AgentOptions {
   visible?: boolean;
   keepOpen?: boolean;
   screenshots?: boolean;
+  recordingPath?: string;
+  screenshotPath?: string;
+  fieldValues?: Record<string, string>;
+  freshContext?: boolean;
 }
 
 export interface AgentSnapshot {
@@ -43,6 +47,7 @@ export class Agent {
   readonly #goal: string;
   readonly #maxSteps: number;
   readonly #screenshots: boolean;
+  readonly #fieldValues: Readonly<Record<string, string>>;
   #page: PageState;
   #decision: Decision | null = null;
   #history: HistoryEntry[] = [];
@@ -58,6 +63,7 @@ export class Agent {
     this.#goal = options.goal.trim();
     this.#maxSteps = options.maxSteps;
     this.#screenshots = options.screenshots ?? false;
+    this.#fieldValues = options.fieldValues ?? {};
   }
 
   static async create(options: AgentOptions): Promise<Agent> {
@@ -72,6 +78,9 @@ export class Agent {
       visible: options.visible,
       keepOpen: options.keepOpen,
       screenshots: options.screenshots,
+      recordingPath: options.recordingPath,
+      screenshotPath: options.screenshotPath,
+      freshContext: options.freshContext,
     });
     try {
       return new Agent(browser, await browser.observe(options.screenshots), options);
@@ -96,6 +105,10 @@ export class Agent {
     };
   }
 
+  get targetId(): string {
+    return this.#browser.targetId;
+  }
+
   private elapsedMs(): number {
     return this.#startedAt === null ? 0 : Math.round(performance.now() - this.#startedAt);
   }
@@ -113,7 +126,7 @@ export class Agent {
       this.#status = "budget_exhausted";
       return;
     }
-    this.#decision = await choose(this.#page, this.#goal, this.#history);
+    this.#decision = await choose(this.#page, this.#goal, this.#history, Object.keys(this.#fieldValues));
     this.#decisions.push(this.#decision);
     this.#status = "predicted";
   }
@@ -144,7 +157,15 @@ export class Agent {
       if (!(await this.#browser.fresh(page))) throw new StalePageError("Page changed before text generation");
       const context = fieldContext(this.#goal, action, page, this.#history);
       const contextKey = stableStringify(context);
-      if (this.#pendingText?.contextKey === contextKey) {
+      const provided = this.#fieldValues[action.label];
+      if (action.sensitive && provided === undefined) {
+        throw new Error(`Sensitive field \"${action.label}\" requires a caller-provided --field-value`);
+      }
+      if (provided !== undefined) {
+        text = provided;
+        helper = { model: "provided-field-value", provider: "caller", latency_ms: 0, usage: {} };
+        this.#textCalls.push({ ...helper, field: action.label, value: action.sensitive ? "[redacted]" : text });
+      } else if (this.#pendingText?.contextKey === contextKey) {
         ({ text, helper } = this.#pendingText);
       } else {
         [text, helper] = await fieldText(context);
@@ -162,7 +183,7 @@ export class Agent {
       probability: decision.probabilities[selected] ?? 0,
       confidence: decision.confidence,
       latency_ms: decision.latency_ms,
-      text,
+      text: action.sensitive && text !== null ? "[redacted]" : text,
       text_helper: helper?.model ?? null,
       text_latency_ms: helper?.latency_ms ?? 0,
       operation: decision.operation,

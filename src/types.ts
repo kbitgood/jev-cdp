@@ -14,6 +14,8 @@ export interface BrowserAction {
   checked?: string | boolean;
   selected?: string | boolean;
   expanded?: string | boolean;
+  pressed?: string | boolean;
+  sensitive?: boolean;
   delta?: number;
   rect?: { x: number; y: number; w: number; h: number };
 }

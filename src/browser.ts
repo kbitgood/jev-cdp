@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { CdpClient, listChromeTargets } from "./cdp";
+import READ_STATE from "./snapshot.js" with { type: "text" };
 import type { BrowserAction, JsonValue, PageState } from "./types";
 
-const READ_STATE = await Bun.file(new URL("./snapshot.js", import.meta.url)).text();
 const MARKER = `(() => { const state=${READ_STATE}; return state?.marker ?? null; })()`;
 
 export class StalePageError extends Error {}
@@ -14,6 +17,19 @@ export interface BrowserOptions {
   visible?: boolean;
   keepOpen?: boolean;
   screenshots?: boolean;
+  recordingPath?: string;
+  screenshotPath?: string;
+  freshContext?: boolean;
+}
+
+interface RecordingFrame {
+  path: string;
+  elapsedMs: number;
+}
+
+interface ScreencastFrame {
+  data: string;
+  sessionId: number;
 }
 
 function stableValue(value: unknown): unknown {
@@ -45,28 +61,47 @@ export class Browser {
   readonly #ownsTarget: boolean;
   readonly #keepOpen: boolean;
   readonly #screenshots: boolean;
+  readonly #browserContextId?: string;
+  readonly #recordingPath?: string;
+  readonly #screenshotPath?: string;
   #afterInput: BrowserAction | null = null;
   #closed = false;
+  #recordingDirectory?: string;
+  #recordingFrames: RecordingFrame[] = [];
+  #recordingStartedAt = 0;
+  #recordingSequence = 0;
+  #recordingWrites: Promise<void> = Promise.resolve();
+  #stopRecordingEvents?: () => void;
 
   private constructor(
     cdp: CdpClient,
     sessionId: string,
     targetId: string,
     ownsTarget: boolean,
+    browserContextId: string | undefined,
     options: BrowserOptions,
   ) {
     this.#cdp = cdp;
     this.#sessionId = sessionId;
     this.#targetId = targetId;
     this.#ownsTarget = ownsTarget;
+    this.#browserContextId = browserContextId;
     this.#keepOpen = options.keepOpen ?? false;
     this.#screenshots = options.screenshots ?? false;
+    this.#recordingPath = options.recordingPath ? resolve(options.recordingPath) : undefined;
+    this.#screenshotPath = options.screenshotPath ? resolve(options.screenshotPath) : undefined;
   }
 
   static async open(options: BrowserOptions): Promise<Browser> {
     const cdp = await CdpClient.connect(options.cdpUrl);
     let targetId = options.targetId;
     const ownsTarget = !targetId;
+    let browserContextId: string | undefined;
+
+    if (targetId && options.freshContext) {
+      cdp.close();
+      throw new Error("--fresh-context cannot be combined with --tab");
+    }
 
     if (targetId) {
       const target = (await listChromeTargets(options.cdpUrl)).find((candidate) => candidate.id === targetId);
@@ -79,11 +114,22 @@ export class Browser {
         cdp.close();
         throw new Error("--url is required when creating a new Chrome tab");
       }
-      const created = await cdp.command<{ targetId: string }>("Target.createTarget", {
-        url: "about:blank",
-        background: !(options.visible ?? false),
-      });
-      targetId = created.targetId;
+      try {
+        if (options.freshContext) {
+          const context = await cdp.command<{ browserContextId: string }>("Target.createBrowserContext");
+          browserContextId = context.browserContextId;
+        }
+        const created = await cdp.command<{ targetId: string }>("Target.createTarget", {
+          url: "about:blank",
+          background: !(options.visible ?? false),
+          ...(browserContextId ? { browserContextId } : {}),
+        });
+        targetId = created.targetId;
+      } catch (error) {
+        if (browserContextId) await cdp.command("Target.disposeBrowserContext", { browserContextId }).catch(() => undefined);
+        cdp.close();
+        throw error;
+      }
     }
 
     if (options.visible) await cdp.command("Target.activateTarget", { targetId });
@@ -91,7 +137,7 @@ export class Browser {
       targetId,
       flatten: true,
     });
-    const browser = new Browser(cdp, attached.sessionId, targetId, ownsTarget, options);
+    const browser = new Browser(cdp, attached.sessionId, targetId, ownsTarget, browserContextId, options);
 
     try {
       await browser.call("Emulation.setDeviceMetricsOverride", {
@@ -103,6 +149,7 @@ export class Browser {
       await browser.call("Emulation.setFocusEmulationEnabled", { enabled: true });
       if (options.url) await browser.call("Page.navigate", { url: options.url });
       await browser.waitForReady();
+      await browser.startRecording();
       return browser;
     } catch (error) {
       await browser.close();
@@ -116,6 +163,102 @@ export class Browser {
     timeoutMs?: number,
   ): Promise<T> {
     return this.#cdp.command<T>(method, params, this.#sessionId, timeoutMs);
+  }
+
+  get targetId(): string {
+    return this.#targetId;
+  }
+
+  private async startRecording(): Promise<void> {
+    if (!this.#recordingPath) return;
+    if (!Bun.which("ffmpeg")) throw new Error("--recording requires ffmpeg on PATH");
+    this.#recordingDirectory = await mkdtemp(join(tmpdir(), "jev-cdp-recording-"));
+    this.#recordingStartedAt = performance.now();
+    this.#stopRecordingEvents = this.#cdp.on("Page.screencastFrame", this.#sessionId, (params) => {
+      const frame = params as unknown as ScreencastFrame;
+      void this.call("Page.screencastFrameAck", { sessionId: frame.sessionId }).catch(() => undefined);
+      const sequence = this.#recordingSequence++;
+      const path = join(this.#recordingDirectory!, `${String(sequence).padStart(6, "0")}.jpg`);
+      const elapsedMs = sequence ? performance.now() - this.#recordingStartedAt : 0;
+      this.#recordingWrites = this.#recordingWrites.then(async () => {
+        await Bun.write(path, Buffer.from(frame.data, "base64"));
+        this.#recordingFrames.push({ path, elapsedMs });
+      });
+    });
+    await this.call("Page.enable");
+    await this.call("Page.startScreencast", {
+      format: "jpeg",
+      quality: 70,
+      maxWidth: 1120,
+      maxHeight: 780,
+      everyNthFrame: 3,
+    });
+  }
+
+  private async finishRecording(): Promise<void> {
+    if (!this.#recordingPath || !this.#recordingDirectory) return;
+    try {
+      await this.call("Page.stopScreencast");
+    } finally {
+      this.#stopRecordingEvents?.();
+      this.#stopRecordingEvents = undefined;
+    }
+    await this.#recordingWrites;
+    if (!this.#recordingFrames.length) throw new Error("Recording produced no browser frames");
+    await mkdir(dirname(this.#recordingPath), { recursive: true });
+    const finishedAt = performance.now() - this.#recordingStartedAt;
+    const quoted = (path: string) => path.replaceAll("'", "'\\''");
+    const lines = ["ffconcat version 1.0"];
+    for (let index = 0; index < this.#recordingFrames.length; index++) {
+      const frame = this.#recordingFrames[index]!;
+      const next = this.#recordingFrames[index + 1];
+      const duration = Math.max(0.04, ((next?.elapsedMs ?? finishedAt) - frame.elapsedMs) / 1000);
+      lines.push(`file '${quoted(frame.path)}'`, `duration ${duration.toFixed(4)}`);
+    }
+    lines.push(`file '${quoted(this.#recordingFrames.at(-1)!.path)}'`);
+    const manifest = join(this.#recordingDirectory, "frames.ffconcat");
+    await Bun.write(manifest, `${lines.join("\n")}\n`);
+    const process = Bun.spawn([
+      Bun.which("ffmpeg")!, "-y", "-f", "concat", "-safe", "0", "-i", manifest,
+      "-vsync", "vfr", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      this.#recordingPath,
+    ], { stdout: "ignore", stderr: "pipe" });
+    const stderr = await new Response(process.stderr).text();
+    if (await process.exited !== 0) throw new Error(`Could not render recording: ${stderr.slice(-800)}`);
+    await rm(this.#recordingDirectory, { recursive: true, force: true });
+    this.#recordingDirectory = undefined;
+  }
+
+  private async saveFinalScreenshot(): Promise<void> {
+    if (!this.#screenshotPath) return;
+    await mkdir(dirname(this.#screenshotPath), { recursive: true });
+    if (this.#recordingDirectory) {
+      await this.#recordingWrites;
+      const finalFrame = this.#recordingFrames.at(-1);
+      if (finalFrame) {
+        await Bun.write(this.#screenshotPath, Bun.file(finalFrame.path));
+        return;
+      }
+    }
+    const capture = await this.call<{ data: string }>("Page.captureScreenshot", { format: "jpeg", quality: 90 });
+    await Bun.write(this.#screenshotPath, Buffer.from(capture.data, "base64"));
+  }
+
+  private async animateCursor(x: number, y: number, click = false): Promise<void> {
+    if (!this.#recordingPath) return;
+    await this.evaluate(`(point => {
+      let cursor=document.getElementById('__jev-recording-cursor');
+      if (!cursor) {
+        cursor=document.createElement('div');
+        cursor.id='__jev-recording-cursor'; cursor.setAttribute('aria-hidden','true');
+        cursor.innerHTML='<svg width="28" height="34" viewBox="0 0 28 34" xmlns="http://www.w3.org/2000/svg"><path d="M2 2v25l7-7 5 11 5-2-5-11h10z" fill="white" stroke="#111827" stroke-width="2.5" stroke-linejoin="round"/></svg>';
+        Object.assign(cursor.style,{position:'fixed',left:'50vw',top:'50vh',width:'28px',height:'34px',zIndex:'2147483647',pointerEvents:'none',filter:'drop-shadow(0 2px 2px rgba(0,0,0,.35))',transition:'left 180ms cubic-bezier(.2,.8,.2,1), top 180ms cubic-bezier(.2,.8,.2,1)',transform:'translate(-3px,-3px)'});
+        document.documentElement.append(cursor);
+      }
+      cursor.style.left=point.x+'px'; cursor.style.top=point.y+'px';
+      if (point.click) cursor.animate([{transform:'translate(-3px,-3px) scale(1)'},{transform:'translate(-3px,-3px) scale(.72)'},{transform:'translate(-3px,-3px) scale(1)'}],{duration:260,easing:'ease-out'});
+    })(${JSON.stringify({ x, y, click })})`);
+    await Bun.sleep(click ? 80 : 200);
   }
 
   private async waitForReady(): Promise<void> {
@@ -209,6 +352,7 @@ export class Browser {
       return;
     }
     if (action.kind === "scroll") {
+      await this.animateCursor(550, 650);
       await this.call("Input.dispatchMouseEvent", {
         type: "mouseWheel", x: 550, y: 650, deltaX: 0, deltaY: action.delta ?? 0,
       });
@@ -237,11 +381,13 @@ export class Browser {
       if (action.kind === "select") throw new Error("Dropdown execution was not confirmed");
       throw new StalePageError("Target changed or is covered");
     }
+    await this.animateCursor(target.x, target.y);
     if (action.kind !== "select") {
       for (const type of ["mousePressed", "mouseReleased"]) {
         await this.call("Input.dispatchMouseEvent", {
           type, x: target.x, y: target.y, button: "left", clickCount: 1,
         });
+        if (type === "mousePressed") await this.animateCursor(target.x, target.y, true);
       }
       if (action.kind === "fill") {
         const modifiers = process.platform === "darwin" ? 4 : 2;
@@ -260,14 +406,27 @@ export class Browser {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    let failure: unknown;
     try {
-      if (this.#ownsTarget && !this.#keepOpen) {
+      if (this.#recordingPath) await Bun.sleep(400);
+      await this.saveFinalScreenshot();
+      await this.finishRecording();
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      if (this.#browserContextId && !this.#keepOpen) {
+        await this.#cdp.command("Target.disposeBrowserContext", { browserContextId: this.#browserContextId });
+      } else if (this.#ownsTarget && !this.#keepOpen) {
         await this.#cdp.command("Target.closeTarget", { targetId: this.#targetId });
       } else {
         await this.#cdp.command("Target.detachFromTarget", { sessionId: this.#sessionId });
       }
+    } catch (error) {
+      failure ??= error;
     } finally {
       this.#cdp.close();
     }
+    if (failure) throw failure;
   }
 }

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Daily List</title>
+    <style>
+      :root { --ink:#172033; --muted:#697386; --line:#dce3ee; --blue:#2864dc; --done:#2c7a59; }
+      * { box-sizing: border-box; }
+      body { margin:0; min-height:100vh; background:linear-gradient(145deg,#eef3fb,#f7f9fc 52%,#edf7f3); color:var(--ink); font-family:ui-rounded,"SF Pro Rounded","Avenir Next",system-ui,sans-serif; }
+      main { width:min(680px,calc(100% - 32px)); margin:0 auto; padding:64px 0; }
+      header { display:flex; align-items:end; justify-content:space-between; gap:24px; margin-bottom:18px; }
+      h1 { margin:0; font-size:clamp(2.2rem,7vw,4.5rem); line-height:.92; letter-spacing:-.06em; }
+      header p { margin:0 0 5px; color:var(--muted); }
+      .card { overflow:hidden; background:#fff; border:1px solid var(--line); border-radius:18px; box-shadow:0 22px 60px rgba(45,65,95,.12); }
+      form { display:grid; grid-template-columns:1fr auto; gap:10px; padding:18px; border-bottom:1px solid var(--line); }
+      input,button { font:inherit; }
+      input { min-width:0; padding:12px 14px; border:1px solid var(--line); border-radius:10px; }
+      button { border:0; border-radius:10px; cursor:pointer; }
+      button:focus-visible,input:focus-visible { outline:3px solid rgba(40,100,220,.3); outline-offset:2px; }
+      .add { padding:12px 18px; background:var(--blue); color:#fff; font-weight:700; }
+      .filters { display:flex; gap:6px; padding:12px 18px; border-bottom:1px solid var(--line); }
+      .filter { padding:7px 11px; background:transparent; color:var(--muted); }
+      .filter[aria-pressed="true"] { background:#e8eefc; color:#194db6; font-weight:700; }
+      ul { margin:0; padding:0; list-style:none; }
+      li { display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:12px; min-height:60px; padding:12px 18px; border-bottom:1px solid var(--line); }
+      li.completed .todo-text { color:var(--muted); text-decoration:line-through; }
+      .toggle { width:24px; height:24px; border:2px solid #9ba8bb; border-radius:50%; background:#fff; color:transparent; }
+      li.completed .toggle { border-color:var(--done); background:var(--done); color:#fff; }
+      .delete { padding:7px 10px; color:#b83a3a; background:transparent; }
+      #empty { margin:0; padding:34px 18px; text-align:center; color:var(--muted); }
+      footer { padding:13px 18px; color:var(--muted); font-size:.83rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header><h1>Daily List</h1><p id="summary" aria-live="polite"></p></header>
+      <section class="card" aria-label="Todo list">
+        <form id="todo-form">
+          <label for="new-todo" hidden>New todo</label>
+          <input id="new-todo" placeholder="What needs doing?" autocomplete="off" required />
+          <button class="add" type="submit">Add todo</button>
+        </form>
+        <nav class="filters" aria-label="Filter todos">
+          <button class="filter" type="button" data-filter="all" aria-pressed="true">All</button>
+          <button class="filter" type="button" data-filter="active" aria-pressed="false">Active</button>
+          <button class="filter" type="button" data-filter="completed" aria-pressed="false">Completed</button>
+        </nav>
+        <ul id="todo-list"></ul>
+        <p id="empty" hidden>No todos here.</p>
+        <footer>Isolated fixture run: <span id="run-id"></span></footer>
+      </section>
+    </main>
+    <script>
+      const runId = new URLSearchParams(location.search).get('run') || 'default';
+      const storageKey = `jev-cdp-todos-${runId}`;
+      const seed = [
+        { id: crypto.randomUUID(), text: 'Review the release notes', completed: false },
+        { id: crypto.randomUUID(), text: 'Run the browser smoke test', completed: false },
+        { id: crypto.randomUUID(), text: 'Share the QA summary', completed: true },
+      ];
+      let todos;
+      try { todos = JSON.parse(localStorage.getItem(storageKey)) ?? seed; } catch { todos = seed; }
+      let filter = 'all';
+      const form = document.querySelector('#todo-form');
+      const input = document.querySelector('#new-todo');
+      const list = document.querySelector('#todo-list');
+      const empty = document.querySelector('#empty');
+      const summary = document.querySelector('#summary');
+      const filters = [...document.querySelectorAll('.filter')];
+      document.querySelector('#run-id').textContent = runId;
+      const save = () => localStorage.setItem(storageKey, JSON.stringify(todos));
+      const visibleTodos = () => filter === 'active' ? todos.filter(todo => !todo.completed)
+        : filter === 'completed' ? todos.filter(todo => todo.completed) : todos;
+      function render() {
+        const visible = visibleTodos();
+        list.replaceChildren(...visible.map(todo => {
+          const item = document.createElement('li');
+          item.className = todo.completed ? 'completed' : '';
+          const toggle = document.createElement('button');
+          toggle.type = 'button'; toggle.className = 'toggle'; toggle.textContent = '✓';
+          toggle.setAttribute('aria-label', `Mark ${todo.text} as ${todo.completed ? 'active' : 'done'}`);
+          const text = document.createElement('span'); text.className = 'todo-text'; text.textContent = todo.text;
+          const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'delete';
+          remove.textContent = 'Delete'; remove.setAttribute('aria-label', `Delete ${todo.text}`);
+          toggle.addEventListener('click', () => { todo.completed = !todo.completed; save(); render(); });
+          remove.addEventListener('click', () => { todos = todos.filter(candidate => candidate.id !== todo.id); save(); render(); });
+          item.append(toggle, text, remove); return item;
+        }));
+        empty.hidden = visible.length > 0;
+        const completed = todos.filter(todo => todo.completed).length;
+        summary.textContent = `${todos.length - completed} open · ${completed} completed`;
+      }
+      form.addEventListener('submit', event => {
+        event.preventDefault(); const text = input.value.trim(); if (!text) return;
+        todos.unshift({ id:crypto.randomUUID(), text, completed:false }); save(); input.value='';
+        filter='all'; filters.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.filter === filter)));
+        render(); input.focus();
+      });
+      filters.forEach(button => button.addEventListener('click', () => {
+        filter=button.dataset.filter;
+        filters.forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
+        render();
+      }));
+      render();
+    </script>
+  </body>
+</html>

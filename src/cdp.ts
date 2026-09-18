@@ -9,12 +9,26 @@ interface CdpEnvelope {
   id?: number;
   result?: unknown;
   error?: { code: number; message: string; data?: string };
+  method?: string;
+  params?: Record<string, unknown>;
+  sessionId?: string;
 }
+
+type CdpEventListener = (params: Record<string, unknown>) => void;
 
 export async function listChromeTargets(cdpUrl: string): Promise<ChromeTarget[]> {
   const response = await fetch(`${cdpUrl.replace(/\/$/, "")}/json/list`);
   if (!response.ok) throw new Error(`Chrome target list returned HTTP ${response.status}`);
   return (await response.json()) as ChromeTarget[];
+}
+
+export async function closeChromeTarget(cdpUrl: string, targetId: string): Promise<void> {
+  const client = await CdpClient.connect(cdpUrl);
+  try {
+    await client.command("Target.closeTarget", { targetId });
+  } finally {
+    client.close();
+  }
 }
 
 async function browserWebSocketUrl(cdpUrl: string): Promise<string> {
@@ -28,12 +42,17 @@ async function browserWebSocketUrl(cdpUrl: string): Promise<string> {
 export class CdpClient {
   readonly #socket: WebSocket;
   readonly #pending = new Map<number, PendingCommand>();
+  readonly #listeners = new Map<string, Set<CdpEventListener>>();
   #nextId = 1;
 
   private constructor(socket: WebSocket) {
     this.#socket = socket;
     socket.addEventListener("message", (event) => {
       const message = JSON.parse(String(event.data)) as CdpEnvelope;
+      if (message.method) {
+        const key = `${message.sessionId ?? ""}:${message.method}`;
+        for (const listener of this.#listeners.get(key) ?? []) listener(message.params ?? {});
+      }
       if (message.id === undefined) return;
       const pending = this.#pending.get(message.id);
       if (!pending) return;
@@ -92,7 +111,19 @@ export class CdpClient {
     });
   }
 
+  on(method: string, sessionId: string, listener: CdpEventListener): () => void {
+    const key = `${sessionId}:${method}`;
+    const listeners = this.#listeners.get(key) ?? new Set<CdpEventListener>();
+    listeners.add(listener);
+    this.#listeners.set(key, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size) this.#listeners.delete(key);
+    };
+  }
+
   close(): void {
+    this.#listeners.clear();
     this.#socket.close();
   }
 }

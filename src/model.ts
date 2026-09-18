@@ -1,8 +1,8 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { NEXT_ACTION, TARGET, TEXT_VALUE } from "./questions";
+import TEXT_SCHEMA from "./text-value.schema.json" with { type: "json" };
 import type {
   BrowserAction,
   ChoiceAnswer,
@@ -14,7 +14,6 @@ import type {
 } from "./types";
 
 const TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone";
-const TEXT_SCHEMA = fileURLToPath(new URL("./text-value.schema.json", import.meta.url));
 
 async function postJson<T>(url: string, key: string, body: unknown): Promise<T> {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -90,7 +89,7 @@ export function actionSpace(actions: BrowserAction[]): ActionSpace {
         label: action.label.split(" → ")[0] ?? action.label,
         operations: [],
       };
-      for (const key of ["role", "value", "checked", "selected", "expanded"] as const) {
+      for (const key of ["role", "value", "checked", "selected", "expanded", "pressed", "sensitive"] as const) {
         if (action[key] !== undefined) element[key] = action[key];
       }
       if (action.kind === "select") {
@@ -113,13 +112,18 @@ export function actionSpace(actions: BrowserAction[]): ActionSpace {
   return { elements, targets, controls };
 }
 
-export async function choose(page: PageState, goal: string, history: HistoryEntry[]): Promise<Decision> {
+export async function choose(
+  page: PageState,
+  goal: string,
+  history: HistoryEntry[],
+  providedFields: string[] = [],
+): Promise<Decision> {
   const key = process.env.TYPESAFE_API_KEY;
   if (!key) throw new Error("TYPESAFE_API_KEY is required");
   const { elements, targets, controls } = actionSpace(page.actions);
   const labels: Record<string, string> = {
     CLICK: "Click an element, button, menu option, autocomplete suggestion, or calendar day.",
-    TYPE_TEXT: "Enter or replace text in an editable field. A small LLM will supply the value from the goal.",
+    TYPE_TEXT: "Enter or replace text in an editable field. Caller values are available for labels in provided_fields; otherwise a small LLM supplies the value from the goal.",
     SELECT: "Select an observed dropdown value.",
   };
   const operations: Record<string, unknown> = {};
@@ -138,7 +142,7 @@ export async function choose(page: PageState, goal: string, history: HistoryEntr
         element: `[${index}] ${action.label}`,
         current_value: action.current_value ?? action.value ?? "",
         ...Object.fromEntries(
-          (["role", "checked", "selected", "expanded"] as const)
+          (["role", "checked", "selected", "expanded", "pressed", "sensitive"] as const)
             .filter((name) => action[name] !== undefined)
             .map((name) => [name, action[name]]),
         ),
@@ -152,6 +156,7 @@ export async function choose(page: PageState, goal: string, history: HistoryEntr
     state: {
       page: { url: page.url, title: page.title, text: page.text },
       elements,
+      provided_fields: providedFields,
       recent_actions: history.slice(-10).map(({ action, kind, text, page_changed }) => ({
         action, kind, text, page_changed,
       })),
@@ -228,6 +233,8 @@ async function codexFieldText(context: unknown): Promise<[string, TextHelperDeta
   }
   const folder = await mkdtemp(join(tmpdir(), "jev-codex-text-"));
   const outputPath = join(folder, "output.json");
+  const schemaPath = join(folder, "schema.json");
+  await Bun.write(schemaPath, JSON.stringify(TEXT_SCHEMA));
   const childEnvironment = Object.fromEntries(
     Object.entries(process.env)
       .filter(([name, value]) => value !== undefined && !["TYPESAFE_API_KEY", "TEXT_MODEL_API_KEY"].includes(name))
@@ -239,7 +246,7 @@ async function codexFieldText(context: unknown): Promise<[string, TextHelperDeta
     "--disable", "shell_tool", "--disable", "apps", "--disable", "browser_use",
     "--disable", "computer_use", "--disable", "image_generation", "--disable", "multi_agent",
     "--model", model, "-c", `model_reasoning_effort="${reasoning}"`,
-    "--output-schema", TEXT_SCHEMA, "--output-last-message", outputPath, "-",
+    "--output-schema", schemaPath, "--output-last-message", outputPath, "-",
   ];
   const prompt = `${TEXT_VALUE}\nReturn only the JSON object required by the output schema.\n\nContext:\n${JSON.stringify(context)}`;
   const started = performance.now();

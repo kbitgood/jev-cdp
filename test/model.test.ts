@@ -36,7 +36,7 @@ test("action space uses one element index with operation-specific targets", () =
   const actions: BrowserAction[] = [
     { id: "e1", kind: "fill", label: "Search", role: "textbox", value: "", node: 10 },
     { id: "e2", kind: "click", label: "Open Search", role: "textbox", value: "", node: 10 },
-    { id: "e3", kind: "click", label: "Go", role: "button", value: "", node: 20 },
+    { id: "e3", kind: "click", label: "Go", role: "button", value: "", pressed: "true", node: 20 },
     { id: "wait", kind: "wait", label: "Wait" },
   ];
   const space = actionSpace(actions);
@@ -45,6 +45,7 @@ test("action space uses one element index with operation-specific targets", () =
   expect(space.targets.TYPE_TEXT?.["1"]?.id).toBe("e1");
   expect(space.targets.CLICK?.["1"]?.id).toBe("e2");
   expect(space.targets.CLICK?.["2"]?.id).toBe("e3");
+  expect(space.elements[1]?.pressed).toBe("true");
   expect(space.controls.WAIT?.id).toBe("wait");
 });
 
