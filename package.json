@@ -1,9 +1,18 @@
 {
   "name": "jev-cdp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A small Jev-powered bridge to Chrome through the Chrome DevTools Protocol.",
   "type": "module",
   "license": "MIT",
+  "bin": {
+    "jev-cdp": "dist/cli.js"
+  },
+  "files": [
+    "dist/cli.js",
+    "LICENSE",
+    "NOTICE.md",
+    "README.md"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/kbitgood/jev-cdp.git"
@@ -11,6 +20,8 @@
   "scripts": {
     "run": "bun src/cli.ts",
     "build": "bun build src/cli.ts --compile --outfile dist/jev-cdp",
+    "build:npm": "bun build src/cli.ts --target bun --outfile dist/cli.js",
+    "prepack": "bun run build:npm",
     "scenario:todo": "bun src/todo-scenario.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",

@@ -24,6 +24,17 @@ This is an early experimental port. See [NOTICE.md](NOTICE.md) for source attrib
 
 ## Setup
 
+Run the published CLI without adding it to a project. Bun must be installed for either command:
+
+```bash
+bunx jev-cdp@0.1.2 help run
+npx -y jev-cdp@0.1.2 help run
+```
+
+Chrome with a CDP endpoint and `TYPESAFE_API_KEY` are required for browser runs. FFmpeg is required for `--recording`.
+
+For source development:
+
 ```bash
 bun install
 cp .env.example .env
