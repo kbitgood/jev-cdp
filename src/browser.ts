@@ -75,8 +75,8 @@ export function fingerprint(page: Pick<PageState, "url" | "text" | "actions" | "
 
 export class Browser {
   readonly #cdp: CdpClient;
-  readonly #sessionId: string;
-  readonly #targetId: string;
+  #sessionId: string;
+  #targetId: string;
   readonly #ownsTarget: boolean;
   readonly #keepOpen: boolean;
   readonly #screenshots: boolean;
@@ -97,6 +97,12 @@ export class Browser {
   #pageLoadPromise: Promise<void> | null = null;
   #resolvePageLoad?: () => void;
   #pauseUntil = 0;
+  #frameSessions = new Map<string, string>();
+  #frameContexts = new Map<string, number>();
+  #knownTargets = new Set<string>();
+  #openedTabs: Array<{ id: string; url: string; title: string }> = [];
+  #cdpUrl: string;
+  #switchOnPopup = false;
 
   private constructor(
     cdp: CdpClient,
@@ -107,6 +113,7 @@ export class Browser {
     options: BrowserOptions,
   ) {
     this.#cdp = cdp;
+    this.#cdpUrl = options.cdpUrl;
     this.#sessionId = sessionId;
     this.#targetId = targetId;
     this.#ownsTarget = ownsTarget;
@@ -164,8 +171,20 @@ export class Browser {
       flatten: true,
     });
     const browser = new Browser(cdp, attached.sessionId, targetId, ownsTarget, browserContextId, options);
+    browser.#knownTargets = new Set((await listChromeTargets(options.cdpUrl)).map(target => target.id));
 
     try {
+      browser.#stopPageEvents.push(cdp.on("Target.attachedToTarget", browser.#sessionId, (params) => {
+        const info = params.targetInfo as { type?: string; targetId?: string } | undefined;
+        if (info?.type === "iframe" && info.targetId && typeof params.sessionId === "string")
+          browser.#frameSessions.set(info.targetId, params.sessionId);
+      }));
+      browser.#stopPageEvents.push(cdp.on("Page.frameNavigated", browser.#sessionId, (params) => {
+        const frame = params.frame as { id?: string } | undefined;
+        if (frame?.id) browser.#frameContexts.delete(frame.id);
+      }));
+      await browser.call("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+      await browser.call("Page.enable");
       await browser.call("Emulation.setDeviceMetricsOverride", {
         width: 1120,
         height: 780,
@@ -252,7 +271,8 @@ export class Browser {
   private async startRecording(): Promise<void> {
     if (!this.#recordingPath) return;
     if (!Bun.which("ffmpeg")) throw new Error("--recording requires ffmpeg on PATH");
-    this.#recordingDirectory = await mkdtemp(join(tmpdir(), "jev-cdp-recording-"));
+    const firstSegment = !this.#recordingDirectory;
+    if (firstSegment) this.#recordingDirectory = await mkdtemp(join(tmpdir(), "jev-cdp-recording-"));
     await this.call("Page.enable");
     await this.call("Page.addScriptToEvaluateOnNewDocument", { source: RECORDING_CURSOR_INIT });
     const viewport = await this.evaluate<{ width: number; height: number }>(
@@ -261,11 +281,10 @@ export class Browser {
     if (!viewport) throw new Error("Could not read the recording viewport");
     await this.animateCursor(viewport.width / 2, viewport.height / 2);
     const initial = await this.call<{ data: string }>("Page.captureScreenshot", { format: "jpeg", quality: 70 });
-    const initialPath = join(this.#recordingDirectory, "000000.jpg");
+    const initialPath = join(this.#recordingDirectory!, `${String(this.#recordingSequence++).padStart(6, "0")}.jpg`);
     await Bun.write(initialPath, Buffer.from(initial.data, "base64"));
-    this.#recordingFrames.push({ path: initialPath, elapsedMs: 0 });
-    this.#recordingSequence = 1;
-    this.#recordingStartedAt = performance.now();
+    if (firstSegment) this.#recordingStartedAt = performance.now();
+    this.#recordingFrames.push({ path: initialPath, elapsedMs: firstSegment ? 0 : performance.now() - this.#recordingStartedAt });
     this.#stopRecordingEvents = this.#cdp.on("Page.screencastFrame", this.#sessionId, (params) => {
       const frame = params as unknown as ScreencastFrame;
       void this.call("Page.screencastFrameAck", { sessionId: frame.sessionId }).catch(() => undefined);
@@ -381,6 +400,61 @@ export class Browser {
     return response.result?.value;
   }
 
+  private async evaluateFrame<T>(frameId: string, expression: string): Promise<T | undefined> {
+    const session = this.#frameSessions.get(frameId);
+    let contextId = this.#frameContexts.get(frameId);
+    if (!session && !contextId) {
+      const context = await this.call<{ executionContextId: number }>("Page.createIsolatedWorld", { frameId });
+      contextId = context.executionContextId;
+      this.#frameContexts.set(frameId, contextId);
+    }
+    const response = await this.#cdp.command<{ result?: { value?: T }; exceptionDetails?: object }>(
+      "Runtime.evaluate", { expression, returnByValue: true, ...(contextId ? { contextId } : {}) }, session ?? this.#sessionId);
+    if (response.exceptionDetails) throw new StalePageError("Frame changed during evaluation");
+    return response.result?.value;
+  }
+
+  private async frameOffset(frameId: string): Promise<{ x: number; y: number }> {
+    const owner = await this.call<{ backendNodeId: number }>("DOM.getFrameOwner", { frameId });
+    const box = await this.call<{ model: { content: number[] } }>("DOM.getBoxModel", { backendNodeId: owner.backendNodeId });
+    return { x: box.model.content[0]!, y: box.model.content[1]! };
+  }
+
+  private async childFrames(): Promise<string[]> {
+    const tree = await this.call<{ frameTree: { childFrames?: Array<{ frame: { id: string } }> } }>("Page.getFrameTree");
+    return (tree.frameTree.childFrames ?? []).map(child => child.frame.id);
+  }
+
+  private async discoverTabs(): Promise<void> {
+    if (!this.#switchOnPopup) return;
+    for (const target of await listChromeTargets(this.#cdpUrl)) {
+      if (target.type !== "page" || this.#knownTargets.has(target.id)) continue;
+      this.#knownTargets.add(target.id);
+      const attached = await this.#cdp.command<{ sessionId: string }>("Target.attachToTarget", { targetId: target.id, flatten: true });
+      try {
+        await this.#cdp.command("Emulation.setDeviceMetricsOverride", {
+          width: 1120, height: 780, deviceScaleFactor: 1, mobile: false,
+        }, attached.sessionId);
+      } finally {
+        if (this.#switchOnPopup) {
+          if (this.#recordingPath) {
+            await this.call("Page.stopScreencast").catch(() => undefined);
+            this.#stopRecordingEvents?.();
+            this.#stopRecordingEvents = undefined;
+            await this.#recordingWrites;
+          }
+          this.#sessionId = attached.sessionId;
+          this.#targetId = target.id;
+          this.#switchOnPopup = false;
+          await this.startRecording();
+        } else {
+          await this.#cdp.command("Target.detachFromTarget", { sessionId: attached.sessionId });
+        }
+      }
+      this.#openedTabs.push({ id: target.id, url: target.url, title: target.title });
+    }
+  }
+
   private async settleAfterInput(): Promise<void> {
     const action = this.#afterInput;
     this.#afterInput = null;
@@ -415,6 +489,7 @@ export class Browser {
 
   async observe(screenshot = this.#screenshots): Promise<PageState> {
     await this.settleAfterInput();
+    await this.discoverTabs();
     let info: Omit<PageState, "fingerprint"> | null | undefined;
     for (let attempt = 0; attempt < 10; attempt++) {
       try {
@@ -426,6 +501,30 @@ export class Browser {
       await Bun.sleep(20);
     }
     if (!info) throw new StalePageError("Document is navigating");
+    if (this.#openedTabs.length) {
+      const targets = await listChromeTargets(this.#cdpUrl);
+      this.#openedTabs = this.#openedTabs.map(tab => {
+        const current = targets.find(target => target.id === tab.id);
+        return current ? { ...tab, url: current.url, title: current.title } : tab;
+      });
+      info.text = `${info.text}\n${this.#openedTabs.map(tab => `Opened new tab: ${tab.title} ${tab.url} (target ${tab.id})`).join("\n")}`;
+    }
+    for (const frameId of await this.childFrames()) {
+      try {
+        const offset = await this.frameOffset(frameId);
+        const child = await this.evaluateFrame<Omit<PageState, "fingerprint"> | null>(frameId, READ_STATE);
+        if (!child) continue;
+        info.text = `${info.text}\n${child.text}`.slice(0, 6000);
+        for (const action of child.actions) {
+          if (!action.node || !action.rect) continue;
+          const rect = { ...action.rect, x: action.rect.x + offset.x, y: action.rect.y + offset.y };
+          if (rect.x < 0 || rect.y < 0 || rect.x >= info.w || rect.y >= info.h) continue;
+          info.actions.push({ ...action, frameId, rect, id: `e${info.actions.length + 1}` });
+          info.guards[`${frameId}:${action.node}`] = child.guards[String(action.node)]!;
+        }
+        info.marker = [info.marker, frameId, child.marker];
+      } catch { /* A frame can navigate or detach while observing. */ }
+    }
     const page: PageState = { ...info, fingerprint: fingerprint(info) };
     if (screenshot) {
       const capture = await this.call<{ data: string }>("Page.captureScreenshot", { format: "jpeg", quality: 72 });
@@ -435,6 +534,12 @@ export class Browser {
   }
 
   async fresh(page: PageState, action?: BrowserAction): Promise<boolean> {
+    if (action?.frameId && typeof action.node === "number") {
+      const current = await this.evaluateFrame<JsonValue>(action.frameId, `(() => {
+        const c=window.__jevFast; return c ? c.guard(c.nodes.get(${action.node})) : null;
+      })()`);
+      return stableStringify(current) === stableStringify(page.guards[`${action.frameId}:${action.node}`]);
+    }
     if (action && (action.kind === "click" || action.kind === "select")) {
       if (typeof action.node !== "number") return false;
       const current = await this.evaluate<JsonValue>(`(() => {
@@ -462,7 +567,11 @@ export class Browser {
     }
     if (typeof action.node !== "number") throw new Error("Invalid observed node");
 
-    const target = await this.evaluate<{ x: number; y: number } | null>(`(action => {
+    const target = await (action.frameId ? this.evaluateFrame<{ x: number; y: number } | null>(action.frameId, `(action => {
+      const e=window.__jevFast?.nodes.get(action.node);
+      if (!e?.isConnected || !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
+      const r=e.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2};
+    })(${JSON.stringify(action)})`) : this.evaluate<{ x: number; y: number } | null>(`(action => {
       const e=window.__jevFast?.nodes.get(action.node);
       if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
           !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
@@ -478,10 +587,15 @@ export class Browser {
         e.dispatchEvent(new Event('change',{bubbles:true}));
       }
       return {x,y};
-    })(${JSON.stringify(action)})`);
+    })(${JSON.stringify(action)})`));
     if (!target) {
       if (action.kind === "select") throw new Error("Dropdown execution was not confirmed");
       throw new StalePageError("Target changed or is covered");
+    }
+    if (action.frameId) {
+      const offset = await this.frameOffset(action.frameId);
+      target.x += offset.x;
+      target.y += offset.y;
     }
     await this.animateCursor(target.x, target.y);
     if (action.kind !== "select") {
@@ -509,6 +623,10 @@ export class Browser {
       }
     }
     this.#afterInput = action;
+    if (action.frameId && action.kind === "click") {
+      this.#switchOnPopup = true;
+      await Bun.sleep(650);
+    }
   }
 
   async close(): Promise<void> {

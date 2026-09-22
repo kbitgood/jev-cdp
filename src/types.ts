@@ -8,6 +8,7 @@ export interface BrowserAction {
   kind: ActionKind;
   label: string;
   node?: number;
+  frameId?: string;
   role?: string;
   value?: string;
   current_value?: string;

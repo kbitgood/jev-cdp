@@ -100,6 +100,8 @@ bun run run -- run \
 
 `--final-state` adds an AI-oriented semantic snapshot to the final JSON on standard output. It includes the final URL, title, visible text, viewport, scroll state, actionable elements, accessible labels, and control state such as `pressed`, `checked`, `selected`, and `expanded`. Progress remains on standard error, so a coding agent can parse standard output as one JSON object and choose the next bounded goal without another browser observation.
 
+The snapshot includes visible controls in direct child iframes, including cross-origin frames. Clicking a link there uses its frame coordinates and checks that the observed control is still current. If that click opens a new tab, Jev switches to it, returns its target ID for the next goal, and keeps the recording and 1120×780 viewport consistent across the switch.
+
 ## Supply known field values without another LLM
 
 For portable QA scenarios, let the planner provide exact test data instead of invoking the Luna fallback. Match a field by its observed accessible label:
