@@ -14,6 +14,7 @@ export interface AgentOptions {
   goal: string;
   cdpUrl: string;
   maxSteps: number;
+  interactionPauses?: number;
   visible?: boolean;
   keepOpen?: boolean;
   screenshots?: boolean;
@@ -81,6 +82,7 @@ export class Agent {
       recordingPath: options.recordingPath,
       screenshotPath: options.screenshotPath,
       freshContext: options.freshContext,
+      interactionPauses: options.interactionPauses,
     });
     try {
       return new Agent(browser, await browser.observe(options.screenshots), options);

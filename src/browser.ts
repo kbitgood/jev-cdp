@@ -20,6 +20,7 @@ export interface BrowserOptions {
   recordingPath?: string;
   screenshotPath?: string;
   freshContext?: boolean;
+  interactionPauses?: number;
 }
 
 interface RecordingFrame {
@@ -61,6 +62,7 @@ export class Browser {
   readonly #ownsTarget: boolean;
   readonly #keepOpen: boolean;
   readonly #screenshots: boolean;
+  readonly #interactionPauses: number;
   readonly #browserContextId?: string;
   readonly #recordingPath?: string;
   readonly #screenshotPath?: string;
@@ -88,6 +90,7 @@ export class Browser {
     this.#browserContextId = browserContextId;
     this.#keepOpen = options.keepOpen ?? false;
     this.#screenshots = options.screenshots ?? false;
+    this.#interactionPauses = options.interactionPauses ?? 0;
     this.#recordingPath = options.recordingPath ? resolve(options.recordingPath) : undefined;
     this.#screenshotPath = options.screenshotPath ? resolve(options.screenshotPath) : undefined;
   }
@@ -173,6 +176,17 @@ export class Browser {
     if (!this.#recordingPath) return;
     if (!Bun.which("ffmpeg")) throw new Error("--recording requires ffmpeg on PATH");
     this.#recordingDirectory = await mkdtemp(join(tmpdir(), "jev-cdp-recording-"));
+    await this.call("Page.enable");
+    const viewport = await this.evaluate<{ width: number; height: number }>(
+      "({width: innerWidth, height: innerHeight})",
+    );
+    if (!viewport) throw new Error("Could not read the recording viewport");
+    await this.animateCursor(viewport.width / 2, viewport.height / 2);
+    const initial = await this.call<{ data: string }>("Page.captureScreenshot", { format: "jpeg", quality: 70 });
+    const initialPath = join(this.#recordingDirectory, "000000.jpg");
+    await Bun.write(initialPath, Buffer.from(initial.data, "base64"));
+    this.#recordingFrames.push({ path: initialPath, elapsedMs: 0 });
+    this.#recordingSequence = 1;
     this.#recordingStartedAt = performance.now();
     this.#stopRecordingEvents = this.#cdp.on("Page.screencastFrame", this.#sessionId, (params) => {
       const frame = params as unknown as ScreencastFrame;
@@ -185,7 +199,6 @@ export class Browser {
         this.#recordingFrames.push({ path, elapsedMs });
       });
     });
-    await this.call("Page.enable");
     await this.call("Page.startScreencast", {
       format: "jpeg",
       quality: 70,
@@ -383,6 +396,12 @@ export class Browser {
     }
     await this.animateCursor(target.x, target.y);
     if (action.kind !== "select") {
+      if (action.kind === "click" && this.#interactionPauses > 0) {
+        await this.call("Input.dispatchMouseEvent", {
+          type: "mouseMoved", x: target.x, y: target.y,
+        });
+        await Bun.sleep(this.#interactionPauses);
+      }
       for (const type of ["mousePressed", "mouseReleased"]) {
         await this.call("Input.dispatchMouseEvent", {
           type, x: target.x, y: target.y, button: "left", clickCount: 1,

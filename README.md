@@ -79,12 +79,13 @@ bun run run -- run \
   --max-steps 4 \
   --visible \
   --keep-open \
+  --interaction-pauses 500 \
   --recording artifacts/example/run.mp4 \
   --screenshot artifacts/example/final.jpg \
   --final-state
 ```
 
-`--recording` captures Chrome's compositor screencast stream for the full goal and renders an H.264 MP4. Because Chrome's native pointer is not part of that stream, the adapter draws a high-contrast cursor that glides to each target and pulses on clicks. `--screenshot` saves the final viewport after the goal stops; when recording is also enabled, it reuses the final screencast frame.
+`--recording` captures Chrome's compositor screencast stream for the full goal and renders an H.264 MP4. Because Chrome's native pointer is not part of that stream, the adapter draws a high-contrast cursor that starts at the viewport center, glides to each target, and pulses on clicks. `--interaction-pauses` adds a deterministic delay in milliseconds after moving to a click target and before pressing the mouse; Jev does not choose or observe this delay. `--screenshot` saves the final viewport after the goal stops; when recording is also enabled, it reuses the final screencast frame.
 
 `--final-state` adds an AI-oriented semantic snapshot to the final JSON on standard output. It includes the final URL, title, visible text, viewport, scroll state, actionable elements, accessible labels, and control state such as `pressed`, `checked`, `selected`, and `expanded`. Progress remains on standard error, so a coding agent can parse standard output as one JSON object and choose the next bounded goal without another browser observation.
 
@@ -169,6 +170,7 @@ The context is disposed after evidence capture by default. Combine it with `--ke
 | `--tab TARGET_ID` | — | create a new tab | Attach to one exact existing Chrome page target |
 | `tabs` | — | — | Print target IDs, titles, and URLs for open page tabs |
 | `--recording PATH.mp4` | — | off | Record the complete goal with an animated cursor |
+| `--interaction-pauses MS` | — | `0` | Wait after moving to a click target, before mousedown |
 | `--screenshot PATH.jpg` | — | off | Save the final browser viewport |
 | `--final-state` | — | off | Include the final semantic page state in stdout JSON |
 | `--field-value LABEL=VALUE` | — | Luna fallback | Type caller-provided test data into the exactly labeled field |

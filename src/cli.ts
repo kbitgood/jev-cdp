@@ -15,6 +15,7 @@ interface RunOptions {
   targetId?: string;
   cdpUrl: string;
   maxSteps: number;
+  interactionPauses: number;
   visible: boolean;
   keepOpen: boolean;
   recordingPath?: string;
@@ -107,6 +108,7 @@ Browser behavior:
                                  [env: JEV_BROWSER_VISIBLE=1]
   --keep-open                    Leave a runner-created tab or context open.
                                  [env: JEV_BROWSER_KEEP_OPEN=1]
+  --interaction-pauses <ms>      Pause after moving to a click target, before mousedown.
 
 Known field values:
   --field-value <label=value>    Type an exact non-secret value when that accessible
@@ -188,6 +190,13 @@ function parsePositiveInteger(value: string, option: string): number {
   return parsed;
 }
 
+function parseNonNegativeInteger(value: string, option: string): number {
+  if (!/^(0|[1-9]\d*)$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new CliError(`${option} must be a non-negative integer in milliseconds`);
+  }
+  return Number(value);
+}
+
 function addFieldValue(options: RunOptions, assignment: string, fromEnvironment: boolean): void {
   const separator = assignment.indexOf("=");
   if (separator < 1 || !assignment.slice(separator + 1)) {
@@ -209,6 +218,7 @@ function parseRunOptions(args: string[]): RunOptions {
   const options: RunOptions = {
     cdpUrl: process.env.CHROME_CDP_URL ?? DEFAULT_CDP_URL,
     maxSteps: parsePositiveInteger(process.env.JEV_MAX_STEPS ?? "12", "JEV_MAX_STEPS"),
+    interactionPauses: 0,
     visible: enabled(process.env.JEV_BROWSER_VISIBLE),
     keepOpen: enabled(process.env.JEV_BROWSER_KEEP_OPEN),
     finalState: false,
@@ -223,6 +233,7 @@ function parseRunOptions(args: string[]): RunOptions {
     else if (argument === "--tab") options.targetId = nextValue(args, index++, argument);
     else if (argument === "--cdp") options.cdpUrl = nextValue(args, index++, argument);
     else if (argument === "--max-steps") options.maxSteps = parsePositiveInteger(nextValue(args, index++, argument), argument);
+    else if (argument === "--interaction-pauses") options.interactionPauses = parseNonNegativeInteger(nextValue(args, index++, argument), argument);
     else if (argument === "--recording") options.recordingPath = nextValue(args, index++, argument);
     else if (argument === "--screenshot") options.screenshotPath = nextValue(args, index++, argument);
     else if (argument === "--field-value") addFieldValue(options, nextValue(args, index++, argument), false);
@@ -275,6 +286,7 @@ async function runGoal(args: string[]): Promise<number> {
       goal: options.goal!,
       cdpUrl: options.cdpUrl,
       maxSteps: options.maxSteps,
+      interactionPauses: options.interactionPauses,
       visible: options.visible,
       keepOpen: options.keepOpen,
       recordingPath: options.recordingPath,
