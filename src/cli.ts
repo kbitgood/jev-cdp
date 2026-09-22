@@ -108,7 +108,8 @@ Browser behavior:
                                  [env: JEV_BROWSER_VISIBLE=1]
   --keep-open                    Leave a runner-created tab or context open.
                                  [env: JEV_BROWSER_KEEP_OPEN=1]
-  --interaction-pauses <ms>      Pause after moving to a click target, before mousedown.
+  --interaction-pauses <ms>      Pause after page loads and before clicks. Jev decisions
+                                 run during page pauses, so only remaining time is waited.
 
 Known field values:
   --field-value <label=value>    Type an exact non-secret value when that accessible

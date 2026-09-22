@@ -175,6 +175,7 @@ export class Agent {
         this.#textCalls.push({ ...helper, field: action.label, value: text });
       }
     }
+    await this.#browser.waitForInteractionPause();
     await this.#browser.act(action, page, text ?? undefined);
     this.#pendingText = null;
     const entry: HistoryEntry = {

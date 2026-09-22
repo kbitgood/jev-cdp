@@ -27,8 +27,8 @@ This is an early experimental port. See [NOTICE.md](NOTICE.md) for source attrib
 Run the published CLI without adding it to a project. Bun must be installed for either command:
 
 ```bash
-bunx jev-cdp@0.1.2 help run
-npx -y jev-cdp@0.1.2 help run
+bunx jev-cdp@0.1.3 help run
+npx -y jev-cdp@0.1.3 help run
 ```
 
 Chrome with a CDP endpoint and `TYPESAFE_API_KEY` are required for browser runs. FFmpeg is required for `--recording`.
@@ -96,7 +96,7 @@ bun run run -- run \
   --final-state
 ```
 
-`--recording` captures Chrome's compositor screencast stream for the full goal and renders an H.264 MP4. Because Chrome's native pointer is not part of that stream, the adapter draws a high-contrast cursor that starts at the viewport center, glides to each target, and pulses on clicks. `--interaction-pauses` adds a deterministic delay in milliseconds after moving to a click target and before pressing the mouse; Jev does not choose or observe this delay. `--screenshot` saves the final viewport after the goal stops; when recording is also enabled, it reuses the final screencast frame.
+`--recording` captures Chrome's compositor screencast stream for the full goal and renders an H.264 MP4. Because Chrome's native pointer is not part of that stream, the adapter draws a high-contrast cursor that starts at the viewport center, glides to each target, and pulses on clicks. `--interaction-pauses` adds a deterministic delay after opening or loading a page, switching to an attached tab, or changing the URL within a page. Jev chooses during that delay, and the adapter waits only for any time left before acting. The same flag also pauses after moving to a click target and before pressing the mouse. Jev does not choose or observe these delays. `--screenshot` saves the final viewport after the goal stops; when recording is also enabled, it reuses the final screencast frame.
 
 `--final-state` adds an AI-oriented semantic snapshot to the final JSON on standard output. It includes the final URL, title, visible text, viewport, scroll state, actionable elements, accessible labels, and control state such as `pressed`, `checked`, `selected`, and `expanded`. Progress remains on standard error, so a coding agent can parse standard output as one JSON object and choose the next bounded goal without another browser observation.
 
@@ -181,7 +181,7 @@ The context is disposed after evidence capture by default. Combine it with `--ke
 | `--tab TARGET_ID` | — | create a new tab | Attach to one exact existing Chrome page target |
 | `tabs` | — | — | Print target IDs, titles, and URLs for open page tabs |
 | `--recording PATH.mp4` | — | off | Record the complete goal with an animated cursor |
-| `--interaction-pauses MS` | — | `0` | Wait after moving to a click target, before mousedown |
+| `--interaction-pauses MS` | — | `0` | Pause after page loads and before clicks, overlapping page pauses with Jev decisions |
 | `--screenshot PATH.jpg` | — | off | Save the final browser viewport |
 | `--final-state` | — | off | Include the final semantic page state in stdout JSON |
 | `--field-value LABEL=VALUE` | — | Luna fallback | Type caller-provided test data into the exactly labeled field |

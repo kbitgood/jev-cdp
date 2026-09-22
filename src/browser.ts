@@ -7,6 +7,24 @@ import READ_STATE from "./snapshot.js" with { type: "text" };
 import type { BrowserAction, JsonValue, PageState } from "./types";
 
 const MARKER = `(() => { const state=${READ_STATE}; return state?.marker ?? null; })()`;
+const RECORDING_CURSOR_INIT = `(() => {
+  if (window !== window.top) return;
+  const mount = () => {
+    if (!document.documentElement) return false;
+    if (document.getElementById('__jev-recording-cursor')) return true;
+    const cursor = document.createElement('div');
+    cursor.id = '__jev-recording-cursor';
+    cursor.setAttribute('aria-hidden', 'true');
+    cursor.innerHTML = '<svg width="28" height="34" viewBox="0 0 28 34" xmlns="http://www.w3.org/2000/svg"><path d="M2 2v25l7-7 5 11 5-2-5-11h10z" fill="white" stroke="#111827" stroke-width="2.5" stroke-linejoin="round"/></svg>';
+    Object.assign(cursor.style, {position:'fixed',left:'50vw',top:'50vh',width:'28px',height:'34px',zIndex:'2147483647',pointerEvents:'none',filter:'drop-shadow(0 2px 2px rgba(0,0,0,.35))',transition:'left 180ms cubic-bezier(.2,.8,.2,1), top 180ms cubic-bezier(.2,.8,.2,1)',transform:'translate(-3px,-3px)'});
+    document.documentElement.append(cursor);
+    return true;
+  };
+  if (!mount()) {
+    const observer = new MutationObserver(() => { if (mount()) observer.disconnect(); });
+    observer.observe(document, { childList: true });
+  }
+})()`;
 
 export class StalePageError extends Error {}
 
@@ -74,6 +92,11 @@ export class Browser {
   #recordingSequence = 0;
   #recordingWrites: Promise<void> = Promise.resolve();
   #stopRecordingEvents?: () => void;
+  #stopPageEvents: (() => void)[] = [];
+  #mainFrameId?: string;
+  #pageLoadPromise: Promise<void> | null = null;
+  #resolvePageLoad?: () => void;
+  #pauseUntil = 0;
 
   private constructor(
     cdp: CdpClient,
@@ -150,8 +173,10 @@ export class Browser {
         mobile: false,
       });
       await browser.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+      await browser.watchPageLoads();
       if (options.url) await browser.call("Page.navigate", { url: options.url });
       await browser.waitForReady();
+      browser.#pauseUntil = performance.now() + browser.#interactionPauses;
       await browser.startRecording();
       return browser;
     } catch (error) {
@@ -172,11 +197,64 @@ export class Browser {
     return this.#targetId;
   }
 
+  private async watchPageLoads(): Promise<void> {
+    if (!this.#interactionPauses) return;
+    await this.call("Page.enable");
+    const tree = await this.call<{ frameTree: { frame: { id: string } } }>("Page.getFrameTree");
+    this.#mainFrameId = tree.frameTree.frame.id;
+    const loading = (params: Record<string, unknown>) => {
+      if (params.frameId !== this.#mainFrameId || this.#pageLoadPromise) return;
+      this.#pageLoadPromise = new Promise<void>((resolve) => { this.#resolvePageLoad = resolve; });
+    };
+    const loaded = () => {
+      if (!this.#pageLoadPromise) return;
+      this.#pauseUntil = performance.now() + this.#interactionPauses;
+      this.#resolvePageLoad?.();
+      this.#resolvePageLoad = undefined;
+      this.#pageLoadPromise = null;
+    };
+    this.#stopPageEvents.push(
+      this.#cdp.on("Page.frameStartedLoading", this.#sessionId, loading),
+      this.#cdp.on("Page.frameNavigated", this.#sessionId, (params) => {
+        const frame = params.frame as { id?: string; parentId?: string } | undefined;
+        if (frame && frame.id === this.#mainFrameId && !frame.parentId) loading({ frameId: frame.id });
+      }),
+      this.#cdp.on("Page.loadEventFired", this.#sessionId, loaded),
+      this.#cdp.on("Page.frameStoppedLoading", this.#sessionId, (params) => {
+        if (params.frameId === this.#mainFrameId) loaded();
+      }),
+      this.#cdp.on("Page.navigatedWithinDocument", this.#sessionId, (params) => {
+        if (params.frameId === this.#mainFrameId) {
+          this.#pauseUntil = performance.now() + this.#interactionPauses;
+          void this.resetRecordingCursor().catch(() => undefined);
+        }
+      }),
+    );
+  }
+
+  async waitForInteractionPause(): Promise<void> {
+    if (!this.#interactionPauses) return;
+    while (true) {
+      const pageLoad = this.#pageLoadPromise;
+      if (pageLoad) {
+        await Promise.race([
+          pageLoad,
+          Bun.sleep(15_000).then(() => { throw new Error("Page did not finish loading within 15 seconds"); }),
+        ]);
+        continue;
+      }
+      const remaining = this.#pauseUntil - performance.now();
+      if (remaining <= 0) return;
+      await Bun.sleep(remaining);
+    }
+  }
+
   private async startRecording(): Promise<void> {
     if (!this.#recordingPath) return;
     if (!Bun.which("ffmpeg")) throw new Error("--recording requires ffmpeg on PATH");
     this.#recordingDirectory = await mkdtemp(join(tmpdir(), "jev-cdp-recording-"));
     await this.call("Page.enable");
+    await this.call("Page.addScriptToEvaluateOnNewDocument", { source: RECORDING_CURSOR_INIT });
     const viewport = await this.evaluate<{ width: number; height: number }>(
       "({width: innerWidth, height: innerHeight})",
     );
@@ -259,25 +337,36 @@ export class Browser {
 
   private async animateCursor(x: number, y: number, click = false): Promise<void> {
     if (!this.#recordingPath) return;
+    await this.evaluate(RECORDING_CURSOR_INIT);
     await this.evaluate(`(point => {
-      let cursor=document.getElementById('__jev-recording-cursor');
-      if (!cursor) {
-        cursor=document.createElement('div');
-        cursor.id='__jev-recording-cursor'; cursor.setAttribute('aria-hidden','true');
-        cursor.innerHTML='<svg width="28" height="34" viewBox="0 0 28 34" xmlns="http://www.w3.org/2000/svg"><path d="M2 2v25l7-7 5 11 5-2-5-11h10z" fill="white" stroke="#111827" stroke-width="2.5" stroke-linejoin="round"/></svg>';
-        Object.assign(cursor.style,{position:'fixed',left:'50vw',top:'50vh',width:'28px',height:'34px',zIndex:'2147483647',pointerEvents:'none',filter:'drop-shadow(0 2px 2px rgba(0,0,0,.35))',transition:'left 180ms cubic-bezier(.2,.8,.2,1), top 180ms cubic-bezier(.2,.8,.2,1)',transform:'translate(-3px,-3px)'});
-        document.documentElement.append(cursor);
-      }
+      const cursor=document.getElementById('__jev-recording-cursor');
+      if (!cursor) return;
       cursor.style.left=point.x+'px'; cursor.style.top=point.y+'px';
       if (point.click) cursor.animate([{transform:'translate(-3px,-3px) scale(1)'},{transform:'translate(-3px,-3px) scale(.72)'},{transform:'translate(-3px,-3px) scale(1)'}],{duration:260,easing:'ease-out'});
     })(${JSON.stringify({ x, y, click })})`);
     await Bun.sleep(click ? 80 : 200);
   }
 
+  private async resetRecordingCursor(): Promise<void> {
+    if (!this.#recordingPath) return;
+    await this.evaluate(`${RECORDING_CURSOR_INIT}; (() => {
+      const cursor = document.getElementById('__jev-recording-cursor');
+      if (!cursor) return;
+      cursor.style.transition = 'none';
+      cursor.style.left = '50vw';
+      cursor.style.top = '50vh';
+      requestAnimationFrame(() => { cursor.style.transition = 'left 180ms cubic-bezier(.2,.8,.2,1), top 180ms cubic-bezier(.2,.8,.2,1)'; });
+    })()`);
+  }
+
   private async waitForReady(): Promise<void> {
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
-      if (await this.evaluate<string>("document.readyState") === "complete") return;
+      try {
+        if (!this.#pageLoadPromise && await this.evaluate<string>("document.readyState") === "complete") return;
+      } catch (error) {
+        if (!(error instanceof StalePageError)) throw error;
+      }
       await Bun.sleep(20);
     }
     throw new Error("Page did not finish loading within 15 seconds");
@@ -425,6 +514,8 @@ export class Browser {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    for (const stop of this.#stopPageEvents) stop();
+    this.#stopPageEvents = [];
     let failure: unknown;
     try {
       if (this.#recordingPath) await Bun.sleep(400);
