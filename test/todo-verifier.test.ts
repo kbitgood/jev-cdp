@@ -10,7 +10,7 @@ import type { BrowserAction, PageState } from "../src/types";
 function page(actions: BrowserAction[]): PageState {
   return {
     url: "http://fixture.test/", title: "Daily List", text: "", w: 100, h: 100,
-    scroll: { y: 0, height: 100 }, actions, marker: [], page_key: [], guards: {},
+    scroll: { y: 0, height: 100 }, actions, frames: [], transitions: [], marker: [], page_key: [], guards: {},
     omitted_actions: 0, fingerprint: "fixture",
   };
 }

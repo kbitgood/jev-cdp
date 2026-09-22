@@ -1,4 +1,4 @@
-import { Browser, StalePageError, stableStringify } from "./browser";
+import { Browser, StalePageError, WaitTimeoutError, stableStringify } from "./browser";
 import { actionSpace, choose, fieldContext, fieldText } from "./model";
 import type {
   AgentStatus,
@@ -15,12 +15,14 @@ export interface AgentOptions {
   cdpUrl: string;
   maxSteps: number;
   interactionPauses?: number;
+  waitBudgetMs?: number;
   visible?: boolean;
   keepOpen?: boolean;
   screenshots?: boolean;
   recordingPath?: string;
   screenshotPath?: string;
   fieldValues?: Record<string, string>;
+  sensitiveFieldLabels?: string[];
   freshContext?: boolean;
 }
 
@@ -35,6 +37,7 @@ export interface AgentSnapshot {
   elapsedMs: number;
   maxSteps: number;
   elements: ReturnType<typeof actionSpace>["elements"];
+  waitTimeout?: { elapsedMs: number; pendingCondition: string };
 }
 
 interface PendingText {
@@ -49,6 +52,7 @@ export class Agent {
   readonly #maxSteps: number;
   readonly #screenshots: boolean;
   readonly #fieldValues: Readonly<Record<string, string>>;
+  readonly #sensitiveFieldLabels: ReadonlySet<string>;
   #page: PageState;
   #decision: Decision | null = null;
   #history: HistoryEntry[] = [];
@@ -57,6 +61,7 @@ export class Agent {
   #status: AgentStatus = "ready";
   #startedAt: number | null = null;
   #pendingText: PendingText | null = null;
+  #waitTimeout?: { elapsedMs: number; pendingCondition: string };
 
   private constructor(browser: Browser, page: PageState, options: AgentOptions) {
     this.#browser = browser;
@@ -65,6 +70,8 @@ export class Agent {
     this.#maxSteps = options.maxSteps;
     this.#screenshots = options.screenshots ?? false;
     this.#fieldValues = options.fieldValues ?? {};
+    this.#sensitiveFieldLabels = new Set(options.sensitiveFieldLabels ?? []);
+    this.#startedAt = performance.now();
   }
 
   static async create(options: AgentOptions): Promise<Agent> {
@@ -83,11 +90,18 @@ export class Agent {
       screenshotPath: options.screenshotPath,
       freshContext: options.freshContext,
       interactionPauses: options.interactionPauses,
+      waitBudgetMs: options.waitBudgetMs,
     });
     try {
-      return new Agent(browser, await browser.observe(options.screenshots), options);
+      const agent = new Agent(browser, await browser.observe(options.screenshots), options);
+      try { await agent.waitForReadiness(); }
+      catch (error) {
+        if (!(error instanceof WaitTimeoutError)) throw error;
+        agent.recordWaitTimeout(error);
+      }
+      return agent;
     } catch (error) {
-      await browser.close();
+      await browser.close().catch(() => undefined);
       throw error;
     }
   }
@@ -104,6 +118,7 @@ export class Agent {
       elapsedMs: this.elapsedMs(),
       maxSteps: this.#maxSteps,
       elements: actionSpace(this.#page.actions).elements,
+      ...(this.#waitTimeout ? { waitTimeout: this.#waitTimeout } : {}),
     };
   }
 
@@ -119,14 +134,11 @@ export class Agent {
     if (this.#startedAt === null) this.#startedAt = performance.now();
     if (!(await this.#browser.fresh(this.#page))) {
       this.#page = await this.#browser.observe(this.#screenshots);
+      await this.waitForReadiness();
     }
     this.#decision = null;
-    if (["done", "blocked", "budget_exhausted"].includes(this.#status)) {
+    if (["done", "blocked", "budget_exhausted", "wait_timeout"].includes(this.#status)) {
       throw new Error("This run has stopped");
-    }
-    if (this.#decisions.length >= this.#maxSteps * 2) {
-      this.#status = "budget_exhausted";
-      return;
     }
     this.#decision = await choose(this.#page, this.#goal, this.#history, Object.keys(this.#fieldValues));
     this.#decisions.push(this.#decision);
@@ -166,7 +178,7 @@ export class Agent {
       if (provided !== undefined) {
         text = provided;
         helper = { model: "provided-field-value", provider: "caller", latency_ms: 0, usage: {} };
-        this.#textCalls.push({ ...helper, field: action.label, value: action.sensitive ? "[redacted]" : text });
+        this.#textCalls.push({ ...helper, field: action.label, value: action.sensitive || this.#sensitiveFieldLabels.has(action.label) ? "[redacted]" : text });
       } else if (this.#pendingText?.contextKey === contextKey) {
         ({ text, helper } = this.#pendingText);
       } else {
@@ -176,7 +188,8 @@ export class Agent {
       }
     }
     await this.#browser.waitForInteractionPause();
-    await this.#browser.act(action, page, text ?? undefined);
+    const fromTargetId = this.#browser.targetId;
+    const { element, performedAt } = await this.#browser.act(action, page, text ?? undefined);
     this.#pendingText = null;
     const entry: HistoryEntry = {
       step: this.#history.length + 1,
@@ -186,21 +199,31 @@ export class Agent {
       probability: decision.probabilities[selected] ?? 0,
       confidence: decision.confidence,
       latency_ms: decision.latency_ms,
-      text: action.sensitive && text !== null ? "[redacted]" : text,
+      text: (action.sensitive || this.#sensitiveFieldLabels.has(action.label)) && text !== null ? "[redacted]" : text,
       text_helper: helper?.model ?? null,
       text_latency_ms: helper?.latency_ms ?? 0,
       operation: decision.operation,
       target: decision.target,
       page_changed: null,
+      from_url: page.url,
       url: page.url,
+      viewport: { width: page.w, height: page.h },
+      from_target_id: fromTargetId,
+      target_id: this.#browser.targetId,
+      element,
+      value: action.kind === "select" ? action.value ?? null : null,
+      delta_y: action.kind === "scroll" ? action.delta ?? 0 : null,
+      redacted: action.kind === "fill" && (Boolean(action.sensitive) || this.#sensitiveFieldLabels.has(action.label)),
       usage: decision.usage,
-      executed_ms: this.elapsedMs(),
+      executed_ms: Math.round(performedAt - this.#startedAt!),
       elapsed_ms: this.elapsedMs(),
     };
     this.#history.push(entry);
     this.#page = await this.#browser.observe(this.#screenshots);
+    await this.waitForReadiness();
     entry.page_changed = this.#page.fingerprint !== page.fingerprint;
     entry.url = this.#page.url;
+    entry.target_id = this.#browser.targetId;
     entry.elapsed_ms = this.elapsedMs();
     this.#status = "ready";
   }
@@ -210,20 +233,39 @@ export class Agent {
       await this.predict();
       await this.act();
     } catch (error) {
+      if (error instanceof WaitTimeoutError) {
+        this.recordWaitTimeout(error);
+        return this.snapshot();
+      }
       if (!(error instanceof StalePageError)) throw error;
       this.#decision = null;
       this.#status = "ready";
       this.#page = await this.#browser.observe(this.#screenshots);
+      try { await this.waitForReadiness(); }
+      catch (waitError) {
+        if (!(waitError instanceof WaitTimeoutError)) throw waitError;
+        this.recordWaitTimeout(waitError);
+      }
     }
     return this.snapshot();
   }
 
   async run(onStep?: (state: AgentSnapshot) => void): Promise<AgentSnapshot> {
-    while (!["done", "blocked", "budget_exhausted"].includes(this.#status)) {
+    while (!["done", "blocked", "budget_exhausted", "wait_timeout"].includes(this.#status)) {
       const state = await this.tick();
       onStep?.(state);
     }
     return this.snapshot();
+  }
+
+  private async waitForReadiness(): Promise<void> {
+    this.#page = await this.#browser.waitForSemanticReady(this.#page, this.#screenshots);
+  }
+
+  private recordWaitTimeout(error: WaitTimeoutError): void {
+    this.#status = "wait_timeout";
+    this.#waitTimeout = { elapsedMs: error.elapsedMs, pendingCondition: error.pendingCondition };
+    if (error.state) this.#page = error.state;
   }
 
   close(): Promise<void> {

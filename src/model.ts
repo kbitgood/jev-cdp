@@ -69,7 +69,7 @@ export interface ActionSpace {
 
 export function actionSpace(actions: BrowserAction[]): ActionSpace {
   const elements: ElementSummary[] = [];
-  const indices = new Map<number, string>();
+  const indices = new Map<string, string>();
   const targets: Record<string, Record<string, BrowserAction>> = {};
   const controls: Record<string, BrowserAction> = {};
   const operations: Record<string, string> = { click: "CLICK", fill: "TYPE_TEXT", select: "SELECT" };
@@ -81,13 +81,21 @@ export function actionSpace(actions: BrowserAction[]): ActionSpace {
       continue;
     }
     if (typeof action.node !== "number") continue;
-    if (!indices.has(action.node)) {
+    const identity = `${action.frameId ?? "main"}:${action.node}`;
+    if (!indices.has(identity)) {
       const index = String(elements.length + 1);
-      indices.set(action.node, index);
+      indices.set(identity, index);
       const element: ElementSummary = {
         index,
         label: action.label.split(" → ")[0] ?? action.label,
         operations: [],
+        frameId: action.frameId ?? null,
+        frameUrl: action.frameUrl ?? null,
+        bounds: action.rect ?? null,
+        nearbyText: action.nearbyText ?? "",
+        region: action.region ?? "",
+        clickable: action.clickable ?? true,
+        coveredBy: action.coveredBy ?? null,
       };
       for (const key of ["role", "value", "checked", "selected", "expanded", "pressed", "sensitive"] as const) {
         if (action[key] !== undefined) element[key] = action[key];
@@ -98,7 +106,8 @@ export function actionSpace(actions: BrowserAction[]): ActionSpace {
       }
       elements.push(element);
     }
-    const index = indices.get(action.node)!;
+    const index = indices.get(identity)!;
+    if (action.clickable === false) continue;
     const group = targets[operation] ??= {};
     const element = elements[Number(index) - 1]!;
     if (!element.operations.includes(operation)) element.operations.push(operation);
@@ -140,6 +149,13 @@ export async function choose(
       type: "choice",
       criteria: Object.fromEntries(Object.entries(candidates).map(([index, action]) => [index, {
         element: `[${index}] ${action.label}`,
+        frame_id: action.frameId ?? null,
+        frame: action.frameUrl ?? page.url,
+        region: action.region ?? "",
+        nearby_text: action.nearbyText ?? "",
+        bounds: action.rect ?? null,
+        clickable: action.clickable ?? true,
+        covered_by: action.coveredBy ?? null,
         current_value: action.current_value ?? action.value ?? "",
         ...Object.fromEntries(
           (["role", "checked", "selected", "expanded", "pressed", "sensitive"] as const)

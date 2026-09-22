@@ -49,6 +49,26 @@ test("action space uses one element index with operation-specific targets", () =
   expect(space.controls.WAIT?.id).toBe("wait");
 });
 
+test("identical node numbers in parent and child frames remain separate targets", () => {
+  const space = actionSpace([
+    { id: "e1", kind: "click", label: "Class", role: "link", node: 1, frameUrl: "https://moodle.test/" },
+    { id: "e2", kind: "click", label: "Class", role: "link", node: 1, frameId: "child",
+      frameUrl: "https://spero.test/class", nearbyText: "Social Studies 10" },
+  ]);
+  expect(space.elements).toHaveLength(2);
+  expect(space.targets.CLICK?.["1"]?.id).toBe("e1");
+  expect(space.targets.CLICK?.["2"]?.id).toBe("e2");
+  expect(space.elements[1]?.frameUrl).toBe("https://spero.test/class");
+});
+
+test("covered controls remain visible in semantic output but are not click targets", () => {
+  const space = actionSpace([{ id: "e1", kind: "click", label: "Class", role: "link", node: 1,
+    clickable: false, coveredBy: { tag: "div", text: "Overlay", role: null } }]);
+  expect(space.elements[0]?.clickable).toBe(false);
+  expect(space.elements[0]?.coveredBy).toEqual({ tag: "div", text: "Overlay", role: null });
+  expect(space.targets.CLICK).toBeUndefined();
+});
+
 describe("text helper validation", () => {
   test("accepts exactly one non-empty text field", () => {
     expect(validateTextOutput({ text: "Never tell me the odds" })).toBe("Never tell me the odds");
@@ -74,6 +94,7 @@ test("fingerprint tracks semantic state but not screenshots", () => {
     h: 100,
     scroll: { y: 0, height: 100 },
     actions: [{ id: "e1", kind: "click", label: "Go", node: 1 } as BrowserAction],
+    frames: [], transitions: [],
     marker: [],
     page_key: [],
     guards: {},

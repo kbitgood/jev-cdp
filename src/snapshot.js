@@ -61,8 +61,15 @@
     const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
     if (!rname || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
+    const hit=document.elementFromPoint(x,y);
+    const coveredBy=hit && !e.contains(hit) && !hit.contains(e) ?
+      {tag:hit.tagName.toLowerCase(),text:(hit.innerText||hit.getAttribute('aria-label')||'').trim().slice(0,160),role:hit.getAttribute('role')} : null;
+    const region=e.closest('form,dialog,[role="dialog"],article,section,li,tr,[role="row"],main,nav,header,footer');
+    const nearbyText=(region?.innerText||e.parentElement?.innerText||'').trim().replace(/\s+/g,' ').slice(0,240);
     const base={node:identity(e),role:rname,label:name(e)||rname,...(sensitive(e)?{sensitive:true}:{}),
-      rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
+      rect:{x:r.x,y:r.y,w:r.width,h:r.height},frameUrl:location.href,
+      nearbyText,region:region?.getAttribute('aria-label')||region?.getAttribute('role')||region?.tagName.toLowerCase()||'',
+      clickable:!coveredBy,coveredBy};
     for (const key of ['checked','selected','expanded','pressed']) {
       const value=e.getAttribute('aria-'+key);
       if (value!==null) base[key]=value;
@@ -103,7 +110,6 @@
   actions.forEach((a,i)=>a.id='e'+(i+1));
   if (scrollY+innerHeight<height-2) actions.push({id:'scroll_down',kind:'scroll',label:'Scroll down',delta:560});
   if (scrollY>0) actions.push({id:'scroll_up',kind:'scroll',label:'Scroll up',delta:-560});
-  actions.push({id:'wait',kind:'wait',label:'Wait for the page to update'});
   return {url:location.href,title:document.title,w:innerWidth,h:innerHeight,text,
     scroll:{y:scrollY,height},actions,marker,page_key,guards,omitted_actions};
 })()

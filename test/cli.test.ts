@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { actionEvent } from "../src/cli";
+import type { HistoryEntry } from "../src/types";
 
 function runCli(...args: string[]) {
   const result = Bun.spawnSync([Bun.which("bun")!, "src/cli.ts", ...args], {
@@ -18,18 +20,19 @@ describe("CLI metadata and help", () => {
   test("prints the package version", () => {
     const result = runCli("--version");
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("jev-cdp 0.1.4\n");
+    expect(result.stdout).toBe("jev-cdp 0.1.5\n");
     expect(result.stderr).toBe("");
   });
 
   test("documents commands, output streams, and exit codes", () => {
     const result = runCli("help", "run");
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Jev CDP 0.1.4 — run");
+    expect(result.stdout).toContain("Jev CDP 0.1.5 — run");
     expect(result.stdout).toContain("--fresh-context");
     expect(result.stdout).toContain("--field-value-env");
     expect(result.stdout).toContain("--interaction-pauses <ms>");
-    expect(result.stdout).toContain("The final result is one JSON object on stdout.");
+    expect(result.stdout).toContain("--wait-budget-ms <number>");
+    expect(result.stdout).toContain("Stdout is JSON Lines: one object per executed action, then one result object.");
     expect(result.stdout).toContain("3  The maximum browser-step budget was exhausted.");
     expect(result.stderr).toBe("");
   });
@@ -47,5 +50,32 @@ describe("CLI metadata and help", () => {
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("--interaction-pauses must be a non-negative integer in milliseconds");
     }
+  });
+
+  test("rejects invalid wait budgets before starting a browser", () => {
+    for (const value of ["0", "-1", "1.5", "abc"]) {
+      const result = runCli("run", "--url", "https://example.com", "--goal", "Click", "--wait-budget-ms", value);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("--wait-budget-ms must be a positive integer");
+    }
+  });
+});
+
+test("action JSON includes a replay target, entered text, timing, and budget without model latency", () => {
+  const entry = {
+    step: 2, kind: "fill", action: "Search", executed_ms: 840, text: "reserved domains",
+    redacted: false, element: { css: "#search", role: "textbox", name: "Search", tag: "input",
+      href: null, inputType: "search", point: { x: 80, y: 40 }, frame: null },
+    from_url: "https://example.test/", url: "https://example.test/results",
+    viewport: { width: 1120, height: 780 },
+    from_target_id: "tab-1", target_id: "tab-1", page_changed: true,
+  } as HistoryEntry;
+  expect(actionEvent(entry, 5)).toEqual({
+    type: "action", status: "executed", step: 2, elapsedMs: 840,
+    budget: { used: 2, max: 5, remaining: 3 },
+    page: { before: "https://example.test/", after: "https://example.test/results", changed: true,
+      viewport: { width: 1120, height: 780 } },
+    tab: { before: "tab-1", after: "tab-1" },
+    action: { kind: "fill", label: "Search", element: entry.element, text: "reserved domains", redacted: false },
   });
 });

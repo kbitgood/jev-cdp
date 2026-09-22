@@ -19,6 +19,29 @@ export interface BrowserAction {
   sensitive?: boolean;
   delta?: number;
   rect?: { x: number; y: number; w: number; h: number };
+  frameUrl?: string;
+  nearbyText?: string;
+  region?: string;
+  clickable?: boolean;
+  coveredBy?: { tag: string; text: string; role: string | null } | null;
+}
+
+export interface FrameState {
+  id: string;
+  parentId: string | null;
+  url: string;
+  loading: boolean;
+  readyState: string | null;
+}
+
+export interface NavigationTransition {
+  kind: "new_tab" | "redirect" | "navigation";
+  control: string;
+  fromTargetId: string;
+  targetId: string;
+  fromUrl: string;
+  destinationUrl: string;
+  settled: boolean;
 }
 
 export interface PageState {
@@ -29,6 +52,8 @@ export interface PageState {
   h: number;
   scroll: { y: number; height: number };
   actions: BrowserAction[];
+  frames: FrameState[];
+  transitions: NavigationTransition[];
   marker: JsonValue;
   page_key: JsonValue;
   guards: Record<string, JsonValue>;
@@ -74,6 +99,17 @@ export interface TextHelperDetails {
   usage: Record<string, unknown>;
 }
 
+export interface ReplayElement {
+  css: string;
+  role: string | null;
+  name: string;
+  tag: string;
+  href: string | null;
+  inputType: string | null;
+  point: { x: number; y: number };
+  frame: { id: string; parentId: string | null; url: string; index: number } | null;
+}
+
 export interface HistoryEntry {
   step: number;
   action: string;
@@ -88,13 +124,21 @@ export interface HistoryEntry {
   operation: string;
   target: string | null;
   page_changed: boolean | null;
+  from_url: string;
   url: string;
+  viewport: { width: number; height: number };
+  from_target_id: string;
+  target_id: string;
+  element: ReplayElement | null;
+  value: string | null;
+  delta_y: number | null;
+  redacted: boolean;
   usage: Record<string, number>;
   executed_ms: number;
   elapsed_ms: number;
 }
 
-export type AgentStatus = "ready" | "predicted" | "done" | "blocked" | "budget_exhausted";
+export type AgentStatus = "ready" | "predicted" | "done" | "blocked" | "budget_exhausted" | "wait_timeout";
 
 export interface ChromeTarget {
   id: string;

@@ -27,8 +27,8 @@ This is an early experimental port. See [NOTICE.md](NOTICE.md) for source attrib
 Run the published CLI without adding it to a project. Bun must be installed for either command:
 
 ```bash
-bunx jev-cdp@0.1.3 help run
-npx -y jev-cdp@0.1.3 help run
+bunx jev-cdp@0.1.5 help run
+npx -y jev-cdp@0.1.5 help run
 ```
 
 Chrome with a CDP endpoint and `TYPESAFE_API_KEY` are required for browser runs. FFmpeg is required for `--recording`.
@@ -98,9 +98,9 @@ bun run run -- run \
 
 `--recording` captures Chrome's compositor screencast stream for the full goal and renders an H.264 MP4. Because Chrome's native pointer is not part of that stream, the adapter draws a high-contrast cursor that starts at the viewport center, glides to each target, and pulses on clicks. `--interaction-pauses` adds a deterministic delay after opening or loading a page, switching to an attached tab, or changing the URL within a page. Jev chooses during that delay, and the adapter waits only for any time left before acting. The same flag also pauses after moving to a click target and before pressing the mouse. Jev does not choose or observe these delays. `--screenshot` saves the final viewport after the goal stops; when recording is also enabled, it reuses the final screencast frame.
 
-`--final-state` adds an AI-oriented semantic snapshot to the final JSON on standard output. It includes the final URL, title, visible text, viewport, scroll state, actionable elements, accessible labels, and control state such as `pressed`, `checked`, `selected`, and `expanded`. Progress remains on standard error, so a coding agent can parse standard output as one JSON object and choose the next bounded goal without another browser observation.
+`jev-cdp run` writes JSON Lines to standard output: one `type:"action"` object per executed action, followed by one `type:"result"` object with the final status and action budget. Action objects include elapsed execution time, the operation, page and tab URLs, the viewport, and a CSS selector, role, name, frame, and coordinates for the element. Fill actions include the entered text; password fields and `--field-value-env` values are redacted and must be supplied separately for replay. Select and scroll actions include their option value or wheel delta. The CSS selector and page URL can be used as Playwright replay targets, with the coordinates as a fallback at the recorded viewport size. `--final-state` adds the final semantic page snapshot: a frame tree with URLs and loading state, actionable elements with frame identity, screen bounds, nearby text, region, clickability, and any element covering the click point, plus new-tab and redirect transitions. Automatic navigation and embedded-content waits use `--wait-budget-ms` (15 seconds by default) and do not consume `--max-steps`; a timeout returns `wait_timeout`, its pending condition and elapsed wait time, and the latest semantic state. Runtime failures emit a `type:"result"` object with `status:"error"`; diagnostic text uses standard error.
 
-The snapshot includes visible controls in direct child iframes, including cross-origin frames. Clicking a link there uses its frame coordinates and checks that the observed control is still current. If that click opens a new tab, Jev switches to it, returns its target ID for the next goal, and keeps the recording and 1120×780 viewport consistent across the switch.
+The snapshot includes visible controls in nested iframes, including cross-origin frames. Clicking a link there uses its frame coordinates and checks that the observed control is still current. If that click opens a new tab, Jev switches to it, returns its target ID for the next goal, and keeps the recording and 1120×780 viewport consistent across the switch.
 
 ## Supply known field values without another LLM
 

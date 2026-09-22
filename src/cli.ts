@@ -2,7 +2,10 @@
 
 import packageJson from "../package.json" with { type: "json" };
 import { Agent } from "./agent";
+import { WaitTimeoutError } from "./browser";
 import { listChromeTargets } from "./cdp";
+import { actionSpace } from "./model";
+import type { FrameState, HistoryEntry, PageState } from "./types";
 
 const NAME = "jev-cdp";
 const TITLE = "Jev CDP";
@@ -16,12 +19,14 @@ interface RunOptions {
   cdpUrl: string;
   maxSteps: number;
   interactionPauses: number;
+  waitBudgetMs: number;
   visible: boolean;
   keepOpen: boolean;
   recordingPath?: string;
   screenshotPath?: string;
   finalState: boolean;
   fieldValues: Record<string, string>;
+  sensitiveFieldLabels: string[];
   freshContext: boolean;
 }
 
@@ -102,6 +107,8 @@ Goal control:
   --goal <text>                  One bounded browser goal. Required.
   --max-steps <number>           Maximum executed browser actions.
                                  [env: JEV_MAX_STEPS] [default: 12]
+  --wait-budget-ms <number>      Total wall-clock budget for page and frame readiness.
+                                 [default: 15000]
 
 Browser behavior:
   --visible                      Activate the controlled tab.
@@ -125,12 +132,13 @@ Evidence and output:
   -h, --help                     Show this help and exit.
 
 Output:
-  The final result is one JSON object on stdout. Progress and diagnostics use stderr.
+  Stdout is JSON Lines: one object per executed action, then one result object.
+  Errors and diagnostics use stderr.
 
 Exit codes:
   0  Jev reported the goal complete.
   1  Invalid configuration or runtime failure.
-  2  Jev reported that it was blocked.
+  2  Jev was blocked or the wait budget timed out.
   3  The maximum browser-step budget was exhausted.
 
 Examples:
@@ -210,6 +218,7 @@ function addFieldValue(options: RunOptions, assignment: string, fromEnvironment:
     const supplied = process.env[environmentName];
     if (!supplied) throw new CliError(`Environment variable is missing or empty: ${environmentName}`);
     options.fieldValues[label] = supplied;
+    options.sensitiveFieldLabels.push(label);
   } else {
     options.fieldValues[label] = assignment.slice(separator + 1);
   }
@@ -220,10 +229,12 @@ function parseRunOptions(args: string[]): RunOptions {
     cdpUrl: process.env.CHROME_CDP_URL ?? DEFAULT_CDP_URL,
     maxSteps: parsePositiveInteger(process.env.JEV_MAX_STEPS ?? "12", "JEV_MAX_STEPS"),
     interactionPauses: 0,
+    waitBudgetMs: 15_000,
     visible: enabled(process.env.JEV_BROWSER_VISIBLE),
     keepOpen: enabled(process.env.JEV_BROWSER_KEEP_OPEN),
     finalState: false,
     fieldValues: {},
+    sensitiveFieldLabels: [],
     freshContext: enabled(process.env.JEV_BROWSER_FRESH_CONTEXT),
   };
 
@@ -235,6 +246,7 @@ function parseRunOptions(args: string[]): RunOptions {
     else if (argument === "--cdp") options.cdpUrl = nextValue(args, index++, argument);
     else if (argument === "--max-steps") options.maxSteps = parsePositiveInteger(nextValue(args, index++, argument), argument);
     else if (argument === "--interaction-pauses") options.interactionPauses = parseNonNegativeInteger(nextValue(args, index++, argument), argument);
+    else if (argument === "--wait-budget-ms") options.waitBudgetMs = parsePositiveInteger(nextValue(args, index++, argument), argument);
     else if (argument === "--recording") options.recordingPath = nextValue(args, index++, argument);
     else if (argument === "--screenshot") options.screenshotPath = nextValue(args, index++, argument);
     else if (argument === "--field-value") addFieldValue(options, nextValue(args, index++, argument), false);
@@ -268,18 +280,41 @@ function parseCommonOptions(args: string[], help: () => string): CommonOptions {
   return options;
 }
 
-function latencyStats(values: number[]) {
+export function actionEvent(entry: HistoryEntry, maxSteps: number) {
   return {
-    count: values.length,
-    totalMs: values.reduce((sum, value) => sum + value, 0),
-    averageMs: values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null,
-    maxMs: values.length ? Math.max(...values) : null,
+    type: "action",
+    status: "executed",
+    step: entry.step,
+    elapsedMs: entry.executed_ms,
+    budget: { used: entry.step, max: maxSteps, remaining: maxSteps - entry.step },
+    page: { before: entry.from_url, after: entry.url, changed: entry.page_changed, viewport: entry.viewport },
+    tab: { before: entry.from_target_id, after: entry.target_id },
+    action: {
+      kind: entry.kind,
+      label: entry.action,
+      element: entry.element,
+      ...(entry.kind === "fill" ? { text: entry.text, redacted: entry.redacted } : {}),
+      ...(entry.kind === "select" ? { optionValue: entry.value } : {}),
+      ...(entry.kind === "scroll" ? { deltaY: entry.delta_y, point: { x: 550, y: 650 } } : {}),
+      ...(entry.kind === "wait" ? { durationMs: 100 } : {}),
+    },
   };
+}
+
+function semanticState(page: PageState, elements: ReturnType<Agent["snapshot"]>["elements"]) {
+  const frameTree = (parentId: string | null): Array<FrameState & { children: unknown[] }> =>
+    page.frames.filter(frame => frame.parentId === parentId)
+      .map(frame => ({ ...frame, children: frameTree(frame.id) }));
+  return { url: page.url, title: page.title, text: page.text,
+    viewport: { width: page.w, height: page.h }, scroll: page.scroll,
+    elements, frameTree: frameTree(null), transitions: page.transitions,
+    omittedActions: page.omitted_actions };
 }
 
 async function runGoal(args: string[]): Promise<number> {
   const options = parseRunOptions(args);
   let agent: Agent | undefined;
+  let reportedActions = 0;
   try {
     agent = await Agent.create({
       url: options.url,
@@ -288,50 +323,59 @@ async function runGoal(args: string[]): Promise<number> {
       cdpUrl: options.cdpUrl,
       maxSteps: options.maxSteps,
       interactionPauses: options.interactionPauses,
+      waitBudgetMs: options.waitBudgetMs,
       visible: options.visible,
       keepOpen: options.keepOpen,
       recordingPath: options.recordingPath,
       screenshotPath: options.screenshotPath,
       fieldValues: options.fieldValues,
+      sensitiveFieldLabels: options.sensitiveFieldLabels,
       freshContext: options.freshContext,
     });
-    let reportedActions = 0;
     const result = await agent.run((state) => {
       const action = state.history.length > reportedActions ? state.history.at(-1) : undefined;
-      const decision = state.decisions.at(-1);
       reportedActions = state.history.length;
-      const operation = action?.operation ?? decision?.operation ?? "none";
-      const jevLatency = action?.latency_ms ?? decision?.latency_ms;
-      const helper = action?.text_helper ? ` text=${action.text_helper}:${action.text_latency_ms}ms` : "";
-      console.error(`elapsed=${state.elapsedMs}ms actions=${state.history.length}/${state.maxSteps} status=${state.status} operation=${operation} jev=${jevLatency ?? 0}ms${helper}`);
+      if (action) console.log(JSON.stringify(actionEvent(action, state.maxSteps)));
     });
+    await agent.close();
     console.log(JSON.stringify({
+      type: "result",
       status: result.status,
       targetId: agent.targetId,
       url: result.page.url,
       actions: result.history.length,
       maxSteps: result.maxSteps,
+      budget: { used: result.history.length, max: result.maxSteps, remaining: result.maxSteps - result.history.length },
       elapsedMs: result.elapsedMs,
       textCalls: result.textCalls.length,
-      latency: {
-        jev: latencyStats(result.decisions.map((decision) => decision.latency_ms)),
-        textHelper: latencyStats(result.textCalls.map((call) => call.latency_ms)),
-      },
+      ...(result.waitTimeout ? { waitTimeout: result.waitTimeout } : {}),
       ...(options.recordingPath ? { recording: options.recordingPath } : {}),
       ...(options.screenshotPath ? { screenshot: options.screenshotPath } : {}),
-      ...(options.finalState ? {
-        finalState: {
-          url: result.page.url,
-          title: result.page.title,
-          text: result.page.text,
-          viewport: { width: result.page.w, height: result.page.h },
-          scroll: result.page.scroll,
-          elements: result.elements,
-          omittedActions: result.page.omitted_actions,
-        },
+      ...(options.finalState || result.status === "wait_timeout" ? {
+        finalState: semanticState(result.page, result.elements),
       } : {}),
     }));
     return result.status === "done" ? 0 : result.status === "budget_exhausted" ? 3 : 2;
+  } catch (error) {
+    const state = agent?.snapshot();
+    for (const action of state?.history.slice(reportedActions) ?? []) {
+      console.log(JSON.stringify(actionEvent(action, options.maxSteps)));
+    }
+    console.log(JSON.stringify({
+      type: "result",
+      status: error instanceof WaitTimeoutError ? "wait_timeout" : "error",
+      targetId: agent?.targetId ?? null,
+      url: state?.page.url ?? (error instanceof WaitTimeoutError ? error.state?.url ?? null : null),
+      actions: state?.history.length ?? 0,
+      maxSteps: options.maxSteps,
+      budget: { used: state?.history.length ?? 0, max: options.maxSteps, remaining: options.maxSteps - (state?.history.length ?? 0) },
+      elapsedMs: state?.elapsedMs ?? 0,
+      ...(error instanceof WaitTimeoutError ? { waitTimeout: { elapsedMs: error.elapsedMs, pendingCondition: error.pendingCondition } } : {}),
+      ...(state ? { finalState: semanticState(state.page, state.elements) } :
+        error instanceof WaitTimeoutError && error.state ? { finalState: semanticState(error.state, actionSpace(error.state.actions).elements) } : {}),
+    }));
+    if (error instanceof WaitTimeoutError) return 2;
+    throw error;
   } finally {
     await agent?.close();
   }

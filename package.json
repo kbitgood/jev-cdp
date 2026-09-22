@@ -1,6 +1,6 @@
 {
   "name": "jev-cdp",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "A small Jev-powered bridge to Chrome through the Chrome DevTools Protocol.",
   "type": "module",
   "license": "MIT",
