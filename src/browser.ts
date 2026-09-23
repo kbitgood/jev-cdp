@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { CdpClient, listChromeTargets } from "./cdp";
 import { recordingEncoder, renderRecording } from "./ffmpeg";
+import { PAGE_HEIGHT, PAGE_WIDTH, composeFrameExpression } from "./recording-visual";
 import READ_STATE from "./snapshot.js" with { type: "text" };
 import type { BrowserAction, ConsoleError, FrameState, JsonValue, NavigationTransition, PageState, ReplayElement } from "./types";
 
@@ -51,6 +52,10 @@ export interface BrowserOptions {
 interface RecordingFrame {
   path: string;
   elapsedMs: number;
+  targetId: string;
+  url: string;
+  newTab: boolean;
+  noticeUrl?: string;
 }
 
 interface ScreencastFrame {
@@ -107,6 +112,12 @@ export class Browser {
   #recordingStartedAt = 0;
   #recordingSequence = 0;
   #recordingWrites: Promise<void> = Promise.resolve();
+  #activeUrl = "about:blank";
+  #recordingUrlEvents: Array<{ elapsedMs: number; targetId: string; url: string }> = [];
+  #newTabNoticeUntil = 0;
+  #newTabNoticeUrl: string | null = null;
+  #newTabNoticeWindows: Array<{ startMs: number; endMs: number }> = [];
+  #hadNewTab = false;
   #stopRecordingEvents?: () => void;
   #stopPageEvents: (() => void)[] = [];
   #mainFrameId?: string;
@@ -209,6 +220,7 @@ export class Browser {
           for (const listener of browser.#popupListeners) listener();
         }
         if (!info?.targetId || !info.url || info.url === "about:blank") return;
+        if (info.targetId === browser.#targetId) browser.setActiveUrl(info.url);
         const urls = browser.#targetUrls.get(info.targetId) ?? [];
         if (urls.at(-1) !== info.url) urls.push(info.url);
         browser.#targetUrls.set(info.targetId, urls);
@@ -233,8 +245,8 @@ export class Browser {
       await browser.watchConsole();
       await browser.call("Page.enable");
       await browser.call("Emulation.setDeviceMetricsOverride", {
-        width: 1120,
-        height: 780,
+        width: PAGE_WIDTH,
+        height: PAGE_HEIGHT,
         deviceScaleFactor: 1,
         mobile: false,
       });
@@ -242,6 +254,7 @@ export class Browser {
       await browser.watchPageLoads();
       if (options.url) await browser.call("Page.navigate", { url: options.url });
       await browser.waitForReady();
+      browser.#activeUrl = await browser.evaluate<string>("location.href") ?? browser.#activeUrl;
       browser.#pauseUntil = performance.now() + browser.#interactionPauses;
       await browser.startRecording();
       return browser;
@@ -261,6 +274,15 @@ export class Browser {
 
   get targetId(): string {
     return this.#targetId;
+  }
+
+  private setActiveUrl(url: string): void {
+    if (!url || url === this.#activeUrl) return;
+    this.#activeUrl = url;
+    if (this.#recordingDirectory && this.#recordingFrames.length) {
+      this.#recordingUrlEvents.push({ elapsedMs: performance.now() - this.#recordingStartedAt,
+        targetId: this.#targetId, url });
+    }
   }
 
   takeConsoleErrors(): ConsoleError[] {
@@ -303,8 +325,9 @@ export class Browser {
 
   private async watchPageLoads(): Promise<void> {
     await this.call("Page.enable");
-    const tree = await this.call<{ frameTree: { frame: { id: string } } }>("Page.getFrameTree");
+    const tree = await this.call<{ frameTree: { frame: { id: string; url?: string } } }>("Page.getFrameTree");
     this.#mainFrameId = tree.frameTree.frame.id;
+    if (tree.frameTree.frame.url) this.setActiveUrl(tree.frameTree.frame.url);
     await this.call("Runtime.addBinding", { name: "__jevDomChanged" });
     const observeDom = `(() => {
       if (window.__jevDomWatching) return;
@@ -333,9 +356,12 @@ export class Browser {
     this.#stopPageEvents.push(
       this.#cdp.on("Page.frameStartedLoading", this.#sessionId, loading),
       this.#cdp.on("Page.frameNavigated", this.#sessionId, (params) => {
-        const frame = params.frame as { id?: string; parentId?: string } | undefined;
+        const frame = params.frame as { id?: string; parentId?: string; url?: string } | undefined;
         this.signalChange();
-        if (frame && frame.id === this.#mainFrameId && !frame.parentId) loading({ frameId: frame.id });
+        if (frame && frame.id === this.#mainFrameId && !frame.parentId) {
+          if (frame.url) this.setActiveUrl(frame.url);
+          loading({ frameId: frame.id });
+        }
       }),
       this.#cdp.on("Page.loadEventFired", this.#sessionId, loaded),
       this.#cdp.on("Page.frameStoppedLoading", this.#sessionId, (params) => {
@@ -346,6 +372,7 @@ export class Browser {
       this.#cdp.on("Page.navigatedWithinDocument", this.#sessionId, (params) => {
         this.signalChange();
         if (params.frameId === this.#mainFrameId) {
+          if (typeof params.url === "string") this.setActiveUrl(params.url);
           this.#pauseUntil = performance.now() + this.#interactionPauses;
           void this.resetRecordingCursor().catch(() => undefined);
         }
@@ -413,25 +440,44 @@ export class Browser {
     const initialPath = join(this.#recordingDirectory!, `${String(this.#recordingSequence++).padStart(6, "0")}.jpg`);
     await Bun.write(initialPath, Buffer.from(initial.data, "base64"));
     if (firstSegment) this.#recordingStartedAt = performance.now();
-    this.#recordingFrames.push({ path: initialPath, elapsedMs: firstSegment ? 0 : performance.now() - this.#recordingStartedAt });
+    const initialElapsedMs = firstSegment ? 0 : performance.now() - this.#recordingStartedAt;
+    this.#recordingFrames.push({ path: initialPath, elapsedMs: initialElapsedMs,
+      targetId: this.#targetId, url: this.#activeUrl, newTab: false });
     this.#stopRecordingEvents = this.#cdp.on("Page.screencastFrame", this.#sessionId, (params) => {
       const frame = params as unknown as ScreencastFrame;
       void this.call("Page.screencastFrameAck", { sessionId: frame.sessionId }).catch(() => undefined);
       const sequence = this.#recordingSequence++;
       const path = join(this.#recordingDirectory!, `${String(sequence).padStart(6, "0")}.jpg`);
-      const elapsedMs = sequence ? performance.now() - this.#recordingStartedAt : 0;
+      const capturedAt = performance.now();
+      const elapsedMs = sequence ? capturedAt - this.#recordingStartedAt : 0;
+      const url = this.#activeUrl;
+      const targetId = this.#targetId;
+      const notice = capturedAt < this.#newTabNoticeUntil;
+      const noticeUrl = notice ? this.#newTabNoticeUrl ?? undefined : undefined;
       this.#recordingWrites = this.#recordingWrites.then(async () => {
         await Bun.write(path, Buffer.from(frame.data, "base64"));
-        this.#recordingFrames.push({ path, elapsedMs });
+        this.#recordingFrames.push({ path, elapsedMs, targetId, url, newTab: notice,
+          ...(noticeUrl ? { noticeUrl } : {}) });
       });
     });
     await this.call("Page.startScreencast", {
       format: "jpeg",
       quality: 70,
-      maxWidth: 1120,
-      maxHeight: 780,
+      maxWidth: PAGE_WIDTH,
+      maxHeight: PAGE_HEIGHT,
       everyNthFrame: 3,
     });
+  }
+
+  private async recordNewTabNotice(url: string): Promise<number | undefined> {
+    if (!this.#recordingPath || !this.#recordingDirectory) return;
+    const capture = await this.call<{ data: string }>("Page.captureScreenshot", { format: "jpeg", quality: 70 });
+    const elapsedMs = performance.now() - this.#recordingStartedAt;
+    const path = join(this.#recordingDirectory, `${String(this.#recordingSequence++).padStart(6, "0")}.jpg`);
+    await Bun.write(path, Buffer.from(capture.data, "base64"));
+    this.#recordingFrames.push({ path, elapsedMs, targetId: this.#targetId, url: this.#activeUrl,
+      newTab: true, noticeUrl: url });
+    return elapsedMs;
   }
 
   private async finishRecording(): Promise<void> {
@@ -444,8 +490,40 @@ export class Browser {
     }
     await this.#recordingWrites;
     if (!this.#recordingFrames.length) throw new Error("Recording produced no browser frames");
+    const stoppedAt = performance.now() - this.#recordingStartedAt;
+    this.#recordingFrames.sort((a, b) => a.elapsedMs - b.elapsedMs);
+    for (const event of this.#recordingUrlEvents) {
+      let index = this.#recordingFrames.length - 1;
+      while (index >= 0 && (this.#recordingFrames[index]!.elapsedMs >= event.elapsedMs ||
+        this.#recordingFrames[index]!.targetId !== event.targetId)) index--;
+      const before = this.#recordingFrames[index];
+      if (!before || before.url === event.url) continue;
+      const path = join(this.#recordingDirectory, `${String(this.#recordingSequence++).padStart(6, "0")}.jpg`);
+      await Bun.write(path, Bun.file(before.path));
+      const frame: RecordingFrame = { path, elapsedMs: event.elapsedMs, targetId: event.targetId,
+        url: event.url, newTab: this.#newTabNoticeWindows.some(window =>
+          event.elapsedMs >= window.startMs && event.elapsedMs < window.endMs), noticeUrl: before.noticeUrl };
+      this.#recordingFrames.push(frame);
+      this.#recordingFrames.sort((a, b) => a.elapsedMs - b.elapsedMs);
+    }
+    for (const { endMs } of this.#newTabNoticeWindows) {
+      if (this.#interactionPauses > 0) continue;
+      let index = this.#recordingFrames.length - 1;
+      while (index >= 0 && this.#recordingFrames[index]!.elapsedMs >= endMs) index--;
+      const before = this.#recordingFrames[index];
+      if (!before?.newTab || this.#recordingFrames[index + 1]?.elapsedMs === endMs) continue;
+      const path = join(this.#recordingDirectory, `${String(this.#recordingSequence++).padStart(6, "0")}.jpg`);
+      await Bun.write(path, Bun.file(before.path));
+      this.#recordingFrames.splice(index + 1, 0, { path, elapsedMs: endMs, targetId: before.targetId,
+        url: before.url, newTab: false });
+    }
+    for (const frame of this.#recordingFrames) {
+      const jpeg = Buffer.from(await Bun.file(frame.path).arrayBuffer()).toString("base64");
+      await Bun.write(frame.path, Buffer.from(await this.composeFrame(jpeg, frame.url,
+        frame.newTab ? frame.noticeUrl ?? frame.url : null), "base64"));
+    }
     await mkdir(dirname(this.#recordingPath), { recursive: true });
-    const finishedAt = performance.now() - this.#recordingStartedAt;
+    const finishedAt = Math.max(stoppedAt, this.#recordingFrames.at(-1)!.elapsedMs + 40);
     const quoted = (path: string) => path.replaceAll("'", "'\\''");
     const lines = ["ffconcat version 1.0"];
     for (let index = 0; index < this.#recordingFrames.length; index++) {
@@ -465,16 +543,16 @@ export class Browser {
   private async saveFinalScreenshot(): Promise<void> {
     if (!this.#screenshotPath) return;
     await mkdir(dirname(this.#screenshotPath), { recursive: true });
-    if (this.#recordingDirectory) {
-      await this.#recordingWrites;
-      const finalFrame = this.#recordingFrames.at(-1);
-      if (finalFrame) {
-        await Bun.write(this.#screenshotPath, Bun.file(finalFrame.path));
-        return;
-      }
-    }
     const capture = await this.call<{ data: string }>("Page.captureScreenshot", { format: "jpeg", quality: 90 });
-    await Bun.write(this.#screenshotPath, Buffer.from(capture.data, "base64"));
+    const url = await this.evaluate<string>("location.href") ?? this.#activeUrl;
+    await Bun.write(this.#screenshotPath, Buffer.from(await this.composeFrame(capture.data, url,
+      this.#hadNewTab ? url : null), "base64"));
+  }
+
+  private async composeFrame(jpeg: string, url: string, newTabUrl: string | null): Promise<string> {
+    const composed = await this.evaluate<string>(composeFrameExpression(jpeg, url, newTabUrl), true);
+    if (!composed) throw new Error("Could not compose browser recording frame");
+    return composed;
   }
 
   private async animateCursor(x: number, y: number, click = false): Promise<void> {
@@ -617,23 +695,37 @@ export class Browser {
       const attached = await this.#cdp.command<{ sessionId: string }>("Target.attachToTarget", { targetId: target.id, flatten: true });
       try {
         await this.#cdp.command("Emulation.setDeviceMetricsOverride", {
-          width: 1120, height: 780, deviceScaleFactor: 1, mobile: false,
+          width: PAGE_WIDTH, height: PAGE_HEIGHT, deviceScaleFactor: 1, mobile: false,
         }, attached.sessionId);
       } finally {
         if (this.#switchOnPopup) {
+          const noticeStart = await this.recordNewTabNotice(target.url);
+          const noticeStartAt = noticeStart === undefined ? performance.now() : this.#recordingStartedAt + noticeStart;
+          this.#newTabNoticeUrl = target.url;
+          this.#newTabNoticeUntil = this.#interactionPauses > 0 ? Infinity : 0;
+          const noticeWindow = noticeStart === undefined ? undefined : { startMs: noticeStart,
+            endMs: noticeStart + Math.max(40, this.#interactionPauses) };
+          if (noticeWindow) this.#newTabNoticeWindows.push(noticeWindow);
+          if (this.#interactionPauses > 0) await Bun.sleep(Math.max(0, noticeStartAt + this.#interactionPauses - performance.now()));
           if (this.#recordingPath) {
             await this.call("Page.stopScreencast").catch(() => undefined);
             this.#stopRecordingEvents?.();
             this.#stopRecordingEvents = undefined;
             await this.#recordingWrites;
           }
+          if (noticeWindow && this.#interactionPauses > 0) noticeWindow.endMs = performance.now() - this.#recordingStartedAt;
+          this.#newTabNoticeUrl = null;
+          this.#newTabNoticeUntil = 0;
           this.#sessionId = attached.sessionId;
           this.#targetId = target.id;
+          this.#activeUrl = target.url;
           this.#loadingFrames.clear();
           await this.watchConsole();
           await this.watchPageLoads();
           this.#switchOnPopup = false;
+          this.#hadNewTab = true;
           await this.startRecording();
+          this.#pauseUntil = performance.now();
         } else {
           await this.#cdp.command("Target.detachFromTarget", { sessionId: attached.sessionId });
         }
@@ -765,7 +857,8 @@ export class Browser {
     const page: PageState = { ...info, frames, transitions: [...this.#transitions], fingerprint: fingerprint(info) };
     if (screenshot) {
       const capture = await this.call<{ data: string }>("Page.captureScreenshot", { format: "jpeg", quality: 72 });
-      page.screenshot = capture.data;
+      page.screenshot = await this.composeFrame(capture.data, info.url,
+        performance.now() < this.#newTabNoticeUntil ? this.#newTabNoticeUrl : null);
     }
     return page;
   }

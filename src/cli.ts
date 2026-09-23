@@ -128,7 +128,7 @@ Known field values:
 Evidence and output:
   --recording <file.mp4>         Record the complete goal with an animated cursor.
                                  Requires FFmpeg.
-  --screenshot <file.jpg>        Save the final browser viewport.
+  --screenshot <file.jpg>        Save a 1280x720 image with the URL bar.
   --final-state                  Add the final semantic page state to stdout JSON.
   -h, --help                     Show this help and exit.
 

@@ -27,8 +27,8 @@ This is an early experimental port. See [NOTICE.md](NOTICE.md) for source attrib
 Run the published CLI without adding it to a project. Bun must be installed for either command:
 
 ```bash
-bunx jev-cdp@0.1.6 help run
-npx -y jev-cdp@0.1.6 help run
+bunx jev-cdp@0.1.7 help run
+npx -y jev-cdp@0.1.7 help run
 ```
 
 Chrome with a CDP endpoint and `TYPESAFE_API_KEY` are required for browser runs. FFmpeg with H.264 encoding (`libx264`) is required for `--recording`. Jev selects `-fps_mode vfr` when FFmpeg supports it and falls back to `-vsync vfr` for older builds. Run `jev-cdp doctor` to check the installed encoder with a short MP4 encode and decode.
@@ -96,13 +96,13 @@ bun run run -- run \
   --final-state
 ```
 
-`--recording` captures Chrome's compositor screencast stream for the full goal and renders an H.264 MP4. Because Chrome's native pointer is not part of that stream, the adapter draws a high-contrast cursor that starts at the viewport center, glides to each target, and pulses on clicks. `--interaction-pauses` adds a deterministic delay after opening or loading a page, switching to an attached tab, or changing the URL within a page. Jev chooses during that delay, and the adapter waits only for any time left before acting. The same flag also pauses after moving to a click target and before pressing the mouse. Jev does not choose or observe these delays. `--screenshot` saves the final viewport after the goal stops; when recording is also enabled, it reuses the final screencast frame.
+`--recording` captures Chrome's compositor screencast stream for the full goal and renders a 1280×720 H.264 MP4. A 40-pixel browser bar shows the active tab's URL above the page. Chrome uses a 1506×800 viewport, scaled to fit the video beneath the bar, so controls remain at their observed coordinates while more of the page fits on screen. Because Chrome's native pointer is not part of the stream, the adapter draws a high-contrast cursor that starts at the viewport center, glides to each target, and pulses on clicks. `--interaction-pauses` adds a deterministic delay after opening or loading a page, changing the URL within a page, or moving to a click target before pressing the mouse. Jev chooses during page pauses, and the adapter waits only for any time left before acting. Jev does not choose or observe those delays. When an action opens a new tab, the recording shows a "New tab opened" notice over the previous tab for the full configured pause, then switches to the new tab. With zero pause, the notice appears for one frame without delaying Jev. `--screenshot` saves a 1280×720 image with the same browser bar, even when recording is off. If a new tab opened, the final screenshot also includes the notice.
 
 `jev-cdp run` writes JSON Lines to standard output: one `type:"action"` object per executed action, followed by one `type:"result"` object with the final status and action budget. Action objects include elapsed execution time, the operation, page and tab URLs, the viewport, and a CSS selector, role, name, frame, and coordinates for the element. Fill actions include the entered text; password fields and `--field-value-env` values are redacted and must be supplied separately for replay. Select and scroll actions include their option value or wheel delta. The CSS selector and page URL can be used as Playwright replay targets, with the coordinates as a fallback at the recorded viewport size. `--final-state` adds the final semantic page snapshot: a frame tree with URLs and loading state, actionable elements with frame identity, screen bounds, nearby text, region, clickability, and any element covering the click point, plus new-tab and redirect transitions. Automatic navigation and embedded-content waits use `--wait-budget-ms` (15 seconds by default) and do not consume `--max-steps`; a timeout returns `wait_timeout`, its pending condition and elapsed wait time, and the latest semantic state. Runtime failures emit a `type:"result"` object with `status:"error"`; diagnostic text uses standard error.
 
 Each action object includes `consoleErrors` observed during that step. The result object includes `initialConsoleErrors` already present when attaching to the tab and `consoleErrors` for the full run. These fields include browser console errors, uncaught exceptions, and error-level DevTools log entries from the page and its frames. Review them alongside the semantic state; a console error does not by itself establish that the goal failed.
 
-The snapshot includes visible controls in nested iframes, including cross-origin frames. Clicking a link there uses its frame coordinates and checks that the observed control is still current. If that click opens a new tab, Jev switches to it, returns its target ID for the next goal, and keeps the recording and 1120×780 viewport consistent across the switch.
+The snapshot includes visible controls in nested iframes, including cross-origin frames. Clicking a link there uses its frame coordinates and checks that the observed control is still current. If that click opens a new tab, Jev switches to it, returns its target ID for the next goal, and keeps the 1506×800 viewport consistent across the switch.
 
 ## Supply known field values without another LLM
 
@@ -184,9 +184,9 @@ The context is disposed after evidence capture by default. Combine it with `--ke
 | `--cdp URL` | `CHROME_CDP_URL` | `http://127.0.0.1:9222` | Chrome DevTools HTTP endpoint |
 | `--tab TARGET_ID` | — | create a new tab | Attach to one exact existing Chrome page target |
 | `tabs` | — | — | Print target IDs, titles, and URLs for open page tabs |
-| `--recording PATH.mp4` | — | off | Record the complete goal with an animated cursor |
+| `--recording PATH.mp4` | — | off | Record a 1280×720 video with a URL bar, animated cursor, and tab notices |
 | `--interaction-pauses MS` | — | `0` | Pause after page loads and before clicks, overlapping page pauses with Jev decisions |
-| `--screenshot PATH.jpg` | — | off | Save the final browser viewport |
+| `--screenshot PATH.jpg` | — | off | Save a 1280×720 image with the URL bar and any new-tab notice |
 | `--final-state` | — | off | Include the final semantic page state in stdout JSON |
 | `--field-value LABEL=VALUE` | — | Luna fallback | Type caller-provided test data into the exactly labeled field |
 | `--field-value-env LABEL=NAME` | — | off | Read a sensitive field value from an environment variable |
