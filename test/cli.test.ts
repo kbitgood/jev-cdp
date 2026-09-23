@@ -21,14 +21,14 @@ describe("CLI metadata and help", () => {
   test("prints the package version", () => {
     const result = runCli("--version");
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("jev-cdp 0.1.5\n");
+    expect(result.stdout).toBe("jev-cdp 0.1.6\n");
     expect(result.stderr).toBe("");
   });
 
   test("documents commands, output streams, and exit codes", () => {
     const result = runCli("help", "run");
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Jev CDP 0.1.5 — run");
+    expect(result.stdout).toContain("Jev CDP 0.1.6 — run");
     expect(result.stdout).toContain("--fresh-context");
     expect(result.stdout).toContain("--field-value-env");
     expect(result.stdout).toContain("--interaction-pauses <ms>");

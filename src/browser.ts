@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { CdpClient, listChromeTargets } from "./cdp";
+import { recordingEncoder, renderRecording } from "./ffmpeg";
 import READ_STATE from "./snapshot.js" with { type: "text" };
 import type { BrowserAction, ConsoleError, FrameState, JsonValue, NavigationTransition, PageState, ReplayElement } from "./types";
 
@@ -398,7 +399,7 @@ export class Browser {
 
   private async startRecording(): Promise<void> {
     if (!this.#recordingPath) return;
-    if (!Bun.which("ffmpeg")) throw new Error("--recording requires ffmpeg on PATH");
+    await recordingEncoder();
     const firstSegment = !this.#recordingDirectory;
     if (firstSegment) this.#recordingDirectory = await mkdtemp(join(tmpdir(), "jev-cdp-recording-"));
     await this.call("Page.enable");
@@ -456,13 +457,7 @@ export class Browser {
     lines.push(`file '${quoted(this.#recordingFrames.at(-1)!.path)}'`);
     const manifest = join(this.#recordingDirectory, "frames.ffconcat");
     await Bun.write(manifest, `${lines.join("\n")}\n`);
-    const process = Bun.spawn([
-      Bun.which("ffmpeg")!, "-y", "-f", "concat", "-safe", "0", "-i", manifest,
-      "-vsync", "vfr", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-      this.#recordingPath,
-    ], { stdout: "ignore", stderr: "pipe" });
-    const stderr = await new Response(process.stderr).text();
-    if (await process.exited !== 0) throw new Error(`Could not render recording: ${stderr.slice(-800)}`);
+    await renderRecording(await recordingEncoder(), manifest, this.#recordingPath);
     await rm(this.#recordingDirectory, { recursive: true, force: true });
     this.#recordingDirectory = undefined;
   }

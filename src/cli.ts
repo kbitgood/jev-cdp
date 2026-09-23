@@ -4,6 +4,7 @@ import packageJson from "../package.json" with { type: "json" };
 import { Agent } from "./agent";
 import { WaitTimeoutError } from "./browser";
 import { listChromeTargets } from "./cdp";
+import { checkRecordingEncoder } from "./ffmpeg";
 import { actionSpace } from "./model";
 import type { FrameState, HistoryEntry, PageState } from "./types";
 
@@ -425,10 +426,11 @@ async function doctor(args: string[]): Promise<number> {
     });
   }
 
-  const ffmpeg = Bun.which("ffmpeg");
-  checks.push(ffmpeg
-    ? { name: "recording", status: "ok", detail: `FFmpeg found at ${ffmpeg}`, required: false }
-    : { name: "recording", status: "warning", detail: "FFmpeg not found; --recording will be unavailable", required: false });
+  try {
+    checks.push({ name: "recording", status: "ok", detail: await checkRecordingEncoder(), required: false });
+  } catch (error) {
+    checks.push({ name: "recording", status: "warning", detail: `${error instanceof Error ? error.message : String(error)}; --recording will be unavailable`, required: false });
+  }
 
   if (process.env.TEXT_MODEL_PROVIDER === "api") {
     checks.push(process.env.TEXT_MODEL_API_KEY
