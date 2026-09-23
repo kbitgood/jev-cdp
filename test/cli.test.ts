@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { actionEvent } from "../src/cli";
+import { redactConsoleErrors } from "../src/agent";
 import type { HistoryEntry } from "../src/types";
 
 function runCli(...args: string[]) {
@@ -69,6 +70,7 @@ test("action JSON includes a replay target, entered text, timing, and budget wit
     from_url: "https://example.test/", url: "https://example.test/results",
     viewport: { width: 1120, height: 780 },
     from_target_id: "tab-1", target_id: "tab-1", page_changed: true,
+    consoleErrors: [{ source: "console", message: "Failed to load", targetId: "tab-1" }],
   } as HistoryEntry;
   expect(actionEvent(entry, 5)).toEqual({
     type: "action", status: "executed", step: 2, elapsedMs: 840,
@@ -76,6 +78,12 @@ test("action JSON includes a replay target, entered text, timing, and budget wit
     page: { before: "https://example.test/", after: "https://example.test/results", changed: true,
       viewport: { width: 1120, height: 780 } },
     tab: { before: "tab-1", after: "tab-1" },
+    consoleErrors: entry.consoleErrors,
     action: { kind: "fill", label: "Search", element: entry.element, text: "reserved domains", redacted: false },
   });
+});
+
+test("console error output redacts caller-provided secret values", () => {
+  expect(redactConsoleErrors([{ source: "console", message: "Token abc123 failed", url: "https://example.test/abc123", targetId: "tab-1" }], ["abc123"]))
+    .toEqual([{ source: "console", message: "Token [redacted] failed", url: "https://example.test/[redacted]", targetId: "tab-1" }]);
 });

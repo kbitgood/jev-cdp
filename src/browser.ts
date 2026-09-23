@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { CdpClient, listChromeTargets } from "./cdp";
 import READ_STATE from "./snapshot.js" with { type: "text" };
-import type { BrowserAction, FrameState, JsonValue, NavigationTransition, PageState, ReplayElement } from "./types";
+import type { BrowserAction, ConsoleError, FrameState, JsonValue, NavigationTransition, PageState, ReplayElement } from "./types";
 
 const MARKER = `(() => { const state=${READ_STATE}; return state?.marker ?? null; })()`;
 const RECORDING_CURSOR_INIT = `(() => {
@@ -127,6 +127,8 @@ export class Browser {
   #targetUrls = new Map<string, string[]>();
   #newTargets = new Set<string>();
   #popupListeners = new Set<() => void>();
+  #consoleErrors: ConsoleError[] = [];
+  #watchedConsoleSessions = new Set<string>();
 
   private constructor(
     cdp: CdpClient,
@@ -217,14 +219,17 @@ export class Browser {
       await cdp.command("Target.setDiscoverTargets", { discover: true });
       browser.#stopPageEvents.push(cdp.on("Target.attachedToTarget", browser.#sessionId, (params) => {
         const info = params.targetInfo as { type?: string; targetId?: string } | undefined;
-        if (info?.type === "iframe" && info.targetId && typeof params.sessionId === "string")
+        if (info?.type === "iframe" && info.targetId && typeof params.sessionId === "string") {
           browser.#frameSessions.set(info.targetId, params.sessionId);
+          void browser.watchConsole(params.sessionId, info.targetId).catch(() => undefined);
+        }
       }));
       browser.#stopPageEvents.push(cdp.on("Page.frameNavigated", browser.#sessionId, (params) => {
         const frame = params.frame as { id?: string } | undefined;
         if (frame?.id) browser.#frameContexts.delete(frame.id);
       }));
       await browser.call("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+      await browser.watchConsole();
       await browser.call("Page.enable");
       await browser.call("Emulation.setDeviceMetricsOverride", {
         width: 1120,
@@ -257,6 +262,44 @@ export class Browser {
     return this.#targetId;
   }
 
+  takeConsoleErrors(): ConsoleError[] {
+    return this.#consoleErrors.splice(0);
+  }
+
+  pendingConsoleErrors(): ConsoleError[] {
+    return [...this.#consoleErrors];
+  }
+
+  private async watchConsole(sessionId = this.#sessionId, targetId = this.#targetId): Promise<void> {
+    if (this.#watchedConsoleSessions.has(sessionId)) return;
+    this.#watchedConsoleSessions.add(sessionId);
+    const record = (source: ConsoleError["source"], message: string, url?: string, timestamp?: number) => {
+      if (!message.trim()) return;
+      this.#consoleErrors.push({ source, message: message.slice(0, 4000), ...(url ? { url } : {}),
+        ...(timestamp !== undefined ? { timestamp } : {}), targetId });
+    };
+    this.#stopPageEvents.push(
+      this.#cdp.on("Runtime.consoleAPICalled", sessionId, (params) => {
+        if (params.type !== "error") return;
+        const args = params.args as Array<{ value?: unknown; description?: string }> | undefined;
+        const message = args?.map(arg => String(arg.value ?? arg.description ?? "")).join(" ") ?? "";
+        const frame = (params.stackTrace as { callFrames?: Array<{ url?: string }> } | undefined)?.callFrames?.[0];
+        record("console", message, frame?.url, typeof params.timestamp === "number" ? params.timestamp : undefined);
+      }),
+      this.#cdp.on("Runtime.exceptionThrown", sessionId, (params) => {
+        const details = params.exceptionDetails as { text?: string; url?: string; exception?: { description?: string } } | undefined;
+        record("exception", details?.exception?.description ?? details?.text ?? "Uncaught exception",
+          details?.url, typeof params.timestamp === "number" ? params.timestamp : undefined);
+      }),
+      this.#cdp.on("Log.entryAdded", sessionId, (params) => {
+        const entry = params.entry as { level?: string; text?: string; url?: string; timestamp?: number } | undefined;
+        if (entry?.level === "error") record("log", entry.text ?? "", entry.url, entry.timestamp);
+      }),
+    );
+    await this.#cdp.command("Runtime.enable", {}, sessionId);
+    await this.#cdp.command("Log.enable", {}, sessionId);
+  }
+
   private async watchPageLoads(): Promise<void> {
     await this.call("Page.enable");
     const tree = await this.call<{ frameTree: { frame: { id: string } } }>("Page.getFrameTree");
@@ -265,7 +308,7 @@ export class Browser {
     const observeDom = `(() => {
       if (window.__jevDomWatching) return;
       window.__jevDomWatching = true;
-      const start = () => new MutationObserver(() => window.__jevDomChanged?.())
+      const start = () => new MutationObserver(() => window.__jevDomChanged?.('change'))
         .observe(document, {subtree:true, childList:true, attributes:true, characterData:true});
       if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start, {once:true});
     })()`;
@@ -592,6 +635,7 @@ export class Browser {
           this.#sessionId = attached.sessionId;
           this.#targetId = target.id;
           this.#loadingFrames.clear();
+          await this.watchConsole();
           await this.watchPageLoads();
           this.#switchOnPopup = false;
           await this.startRecording();

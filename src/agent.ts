@@ -2,6 +2,7 @@ import { Browser, StalePageError, WaitTimeoutError, stableStringify } from "./br
 import { actionSpace, choose, fieldContext, fieldText } from "./model";
 import type {
   AgentStatus,
+  ConsoleError,
   Decision,
   HistoryEntry,
   PageState,
@@ -38,12 +39,20 @@ export interface AgentSnapshot {
   maxSteps: number;
   elements: ReturnType<typeof actionSpace>["elements"];
   waitTimeout?: { elapsedMs: number; pendingCondition: string };
+  initialConsoleErrors: ConsoleError[];
+  consoleErrors: ConsoleError[];
 }
 
 interface PendingText {
   contextKey: string;
   text: string;
   helper: TextHelperDetails;
+}
+
+export function redactConsoleErrors(errors: ConsoleError[], secrets: readonly string[]): ConsoleError[] {
+  const redact = (text: string) => secrets.reduce((value, secret) => value.replaceAll(secret, "[redacted]"), text);
+  return errors.map(error => ({ ...error, message: redact(error.message),
+    ...(error.url ? { url: redact(error.url) } : {}) }));
 }
 
 export class Agent {
@@ -53,6 +62,7 @@ export class Agent {
   readonly #screenshots: boolean;
   readonly #fieldValues: Readonly<Record<string, string>>;
   readonly #sensitiveFieldLabels: ReadonlySet<string>;
+  readonly #secretValues: readonly string[];
   #page: PageState;
   #decision: Decision | null = null;
   #history: HistoryEntry[] = [];
@@ -62,6 +72,7 @@ export class Agent {
   #startedAt: number | null = null;
   #pendingText: PendingText | null = null;
   #waitTimeout?: { elapsedMs: number; pendingCondition: string };
+  #initialConsoleErrors: ConsoleError[] = [];
 
   private constructor(browser: Browser, page: PageState, options: AgentOptions) {
     this.#browser = browser;
@@ -71,6 +82,9 @@ export class Agent {
     this.#screenshots = options.screenshots ?? false;
     this.#fieldValues = options.fieldValues ?? {};
     this.#sensitiveFieldLabels = new Set(options.sensitiveFieldLabels ?? []);
+    this.#secretValues = Object.entries(this.#fieldValues)
+      .filter(([label, value]) => this.#sensitiveFieldLabels.has(label) && value.length > 0)
+      .map(([, value]) => value);
     this.#startedAt = performance.now();
   }
 
@@ -99,6 +113,7 @@ export class Agent {
         if (!(error instanceof WaitTimeoutError)) throw error;
         agent.recordWaitTimeout(error);
       }
+      agent.#initialConsoleErrors = redactConsoleErrors(browser.takeConsoleErrors(), agent.#secretValues);
       return agent;
     } catch (error) {
       await browser.close().catch(() => undefined);
@@ -118,6 +133,9 @@ export class Agent {
       elapsedMs: this.elapsedMs(),
       maxSteps: this.#maxSteps,
       elements: actionSpace(this.#page.actions).elements,
+      initialConsoleErrors: [...this.#initialConsoleErrors],
+      consoleErrors: [...this.#initialConsoleErrors, ...this.#history.flatMap(entry => entry.consoleErrors),
+        ...redactConsoleErrors(this.#browser.pendingConsoleErrors(), this.#secretValues)],
       ...(this.#waitTimeout ? { waitTimeout: this.#waitTimeout } : {}),
     };
   }
@@ -217,10 +235,12 @@ export class Agent {
       usage: decision.usage,
       executed_ms: Math.round(performedAt - this.#startedAt!),
       elapsed_ms: this.elapsedMs(),
+      consoleErrors: [],
     };
     this.#history.push(entry);
     this.#page = await this.#browser.observe(this.#screenshots);
     await this.waitForReadiness();
+    entry.consoleErrors = redactConsoleErrors(this.#browser.takeConsoleErrors(), this.#secretValues);
     entry.page_changed = this.#page.fingerprint !== page.fingerprint;
     entry.url = this.#page.url;
     entry.target_id = this.#browser.targetId;

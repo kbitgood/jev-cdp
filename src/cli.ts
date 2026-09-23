@@ -133,6 +133,8 @@ Evidence and output:
 
 Output:
   Stdout is JSON Lines: one object per executed action, then one result object.
+  Each action includes new console errors observed during that step. The result
+  includes initial errors and all errors observed during the run.
   Errors and diagnostics use stderr.
 
 Exit codes:
@@ -289,6 +291,7 @@ export function actionEvent(entry: HistoryEntry, maxSteps: number) {
     budget: { used: entry.step, max: maxSteps, remaining: maxSteps - entry.step },
     page: { before: entry.from_url, after: entry.url, changed: entry.page_changed, viewport: entry.viewport },
     tab: { before: entry.from_target_id, after: entry.target_id },
+    consoleErrors: entry.consoleErrors,
     action: {
       kind: entry.kind,
       label: entry.action,
@@ -332,12 +335,13 @@ async function runGoal(args: string[]): Promise<number> {
       sensitiveFieldLabels: options.sensitiveFieldLabels,
       freshContext: options.freshContext,
     });
-    const result = await agent.run((state) => {
+    await agent.run((state) => {
       const action = state.history.length > reportedActions ? state.history.at(-1) : undefined;
       reportedActions = state.history.length;
       if (action) console.log(JSON.stringify(actionEvent(action, state.maxSteps)));
     });
     await agent.close();
+    const result = agent.snapshot();
     console.log(JSON.stringify({
       type: "result",
       status: result.status,
@@ -348,6 +352,8 @@ async function runGoal(args: string[]): Promise<number> {
       budget: { used: result.history.length, max: result.maxSteps, remaining: result.maxSteps - result.history.length },
       elapsedMs: result.elapsedMs,
       textCalls: result.textCalls.length,
+      initialConsoleErrors: result.initialConsoleErrors,
+      consoleErrors: result.consoleErrors,
       ...(result.waitTimeout ? { waitTimeout: result.waitTimeout } : {}),
       ...(options.recordingPath ? { recording: options.recordingPath } : {}),
       ...(options.screenshotPath ? { screenshot: options.screenshotPath } : {}),
@@ -370,6 +376,8 @@ async function runGoal(args: string[]): Promise<number> {
       maxSteps: options.maxSteps,
       budget: { used: state?.history.length ?? 0, max: options.maxSteps, remaining: options.maxSteps - (state?.history.length ?? 0) },
       elapsedMs: state?.elapsedMs ?? 0,
+      initialConsoleErrors: state?.initialConsoleErrors ?? [],
+      consoleErrors: state?.consoleErrors ?? [],
       ...(error instanceof WaitTimeoutError ? { waitTimeout: { elapsedMs: error.elapsedMs, pendingCondition: error.pendingCondition } } : {}),
       ...(state ? { finalState: semanticState(state.page, state.elements) } :
         error instanceof WaitTimeoutError && error.state ? { finalState: semanticState(error.state, actionSpace(error.state.actions).elements) } : {}),

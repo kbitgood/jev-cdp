@@ -44,6 +44,14 @@ export interface NavigationTransition {
   settled: boolean;
 }
 
+export interface ConsoleError {
+  source: "console" | "exception" | "log";
+  message: string;
+  url?: string;
+  timestamp?: number;
+  targetId: string;
+}
+
 export interface PageState {
   url: string;
   title: string;
@@ -136,6 +144,7 @@ export interface HistoryEntry {
   usage: Record<string, number>;
   executed_ms: number;
   elapsed_ms: number;
+  consoleErrors: ConsoleError[];
 }
 
 export type AgentStatus = "ready" | "predicted" | "done" | "blocked" | "budget_exhausted" | "wait_timeout";

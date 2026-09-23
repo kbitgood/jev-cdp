@@ -89,14 +89,20 @@
       if (editable) actions.push({...base,kind:'click',value,label:'Open '+base.label});
     }
   }
-  const words=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
-  const range=document.createRange(); let node,length=0;
-  while ((node=walker.nextNode()) && length<6000) {
-    const value=node.textContent.trim(), parent=node.parentElement;
-    if (!value || !parent || parent.closest('script,style,noscript,template') || !visible(parent)) continue;
-    range.selectNodeContents(node); const r=range.getBoundingClientRect();
-    if (r.width>0 && r.height>0 && r.bottom>0 && r.top<innerHeight && r.right>0 && r.left<innerWidth) {
-      words.push(value); length+=value.length;
+  const roots=[document.body], shadowRoots=[];
+  for (const root of roots) for (const e of root.querySelectorAll('*')) {
+    if (e.shadowRoot) { roots.push(e.shadowRoot); shadowRoots.push(e.shadowRoot); }
+  }
+  const words=[], range=document.createRange(); let length=0;
+  for (const root of [...shadowRoots,document.body]) {
+    const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT); let node;
+    while ((node=walker.nextNode()) && length<6000) {
+      const value=node.textContent.trim(), parent=node.parentElement;
+      if (!value || !parent || parent.closest('script,style,noscript,template') || !visible(parent)) continue;
+      range.selectNodeContents(node); const r=range.getBoundingClientRect();
+      if (r.width>0 && r.height>0 && r.bottom>0 && r.top<innerHeight && r.right>0 && r.left<innerWidth) {
+        words.push(value); length+=value.length;
+      }
     }
   }
   const text=words.join('\n').slice(0,6000), height=document.documentElement.scrollHeight;

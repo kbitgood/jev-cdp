@@ -16,6 +16,7 @@ test("semantic frame readiness, duplicate links, overlays, and redirected popup"
     if (path === "/async") return new Response('<p>Loading class</p><script>setTimeout(() => { document.body.innerHTML = \'<a href="/class">Class</a>\' }, 600)</script>', { headers: { "content-type": "text/html" } });
     if (path === "/nested-parent") return new Response('<iframe src="/nested" style="width:400px;height:200px"></iframe>', { headers: { "content-type": "text/html" } });
     if (path === "/nested") return new Response('<a href="/class">Deep class</a>', { headers: { "content-type": "text/html" } });
+    if (path === "/frame-error") return new Response('<script>console.error("embedded failure")</script>', { headers: { "content-type": "text/html" } });
     return new Response('<a href="/class">Class</a>', { headers: { "content-type": "text/html" } });
   } });
   let parentPort = 0;
@@ -27,6 +28,9 @@ test("semantic frame readiness, duplicate links, overlays, and redirected popup"
     if (path === "/async-parent") return new Response(`<iframe title="Lesson" src="http://127.0.0.1:${child.port}/async" style="width:600px;height:300px"></iframe>`, { headers: { "content-type": "text/html" } });
     if (path === "/nested-case") return new Response(`<iframe title="Lesson" src="http://127.0.0.1:${child.port}/nested-parent" style="width:600px;height:300px"></iframe>`, { headers: { "content-type": "text/html" } });
     if (path === "/overlay") return new Response('<a id="covered" href="/class" style="position:absolute;left:20px;top:20px;width:120px;height:40px">Class</a><div style="position:absolute;left:20px;top:20px;width:120px;height:40px;background:yellow">Overlay</div>', { headers: { "content-type": "text/html" } });
+    if (path === "/shadow-issue") return new Response('<nextjs-portal></nextjs-portal><script>document.querySelector("nextjs-portal").attachShadow({mode:"open"}).innerHTML=`<div style="position:fixed;bottom:0;left:0">1 Issue</div>`</script>', { headers: { "content-type": "text/html" } });
+    if (path === "/console-errors") return new Response('<button onclick="console.error(\'step failure\');document.body.append(document.createElement(\'span\'));throw Error(\'uncaught step failure\')">Trigger error</button><script>console.error("initial failure")</script>', { headers: { "content-type": "text/html" } });
+    if (path === "/frame-error-parent") return new Response(`<iframe src="http://127.0.0.1:${child.port}/frame-error"></iframe>`, { headers: { "content-type": "text/html" } });
     return new Response(`<a href="/class">Class</a><p>Loading class</p><iframe title="Lesson" src="http://127.0.0.1:${child.port}/slow" style="width:600px;height:300px"></iframe>`, { headers: { "content-type": "text/html" } });
   } });
   parentPort = parent.port ?? 0;
@@ -95,6 +99,27 @@ test("semantic frame readiness, duplicate links, overlays, and redirected popup"
     const covered = overlay.actions.find(action => action.node && action.label === "Class");
     expect(covered?.clickable).toBe(false);
     expect(covered?.coveredBy?.text).toContain("Overlay");
+    await browser.close(); browser = undefined;
+
+    browser = await Browser.open({ cdpUrl, url: `http://127.0.0.1:${parent.port}/shadow-issue`, waitBudgetMs: 5_000 });
+    const shadowIssue = await browser.observe();
+    expect(shadowIssue.text).toContain("1 Issue");
+    await browser.close(); browser = undefined;
+
+    browser = await Browser.open({ cdpUrl, url: `http://127.0.0.1:${parent.port}/console-errors`, waitBudgetMs: 5_000 });
+    expect(browser.takeConsoleErrors().some(error => error.message.includes("initial failure"))).toBe(true);
+    const beforeError = await browser.observe();
+    await browser.act(beforeError.actions.find(action => action.label === "Trigger error")!, beforeError);
+    const stepErrors = browser.takeConsoleErrors();
+    expect(stepErrors.some(error => error.message.includes("step failure"))).toBe(true);
+    expect(stepErrors.some(error => error.source === "exception" && error.message.includes("uncaught step failure"))).toBe(true);
+    expect(stepErrors.some(error => error.message.includes("Invalid arguments"))).toBe(false);
+    expect(browser.takeConsoleErrors()).toEqual([]);
+    await browser.close(); browser = undefined;
+
+    browser = await Browser.open({ cdpUrl, url: `http://127.0.0.1:${parent.port}/frame-error-parent`, waitBudgetMs: 5_000 });
+    await browser.waitForSemanticReady(await browser.observe());
+    expect(browser.takeConsoleErrors().some(error => error.message.includes("embedded failure"))).toBe(true);
     await browser.close(); browser = undefined;
 
     browser = await Browser.open({ cdpUrl, url: `http://127.0.0.1:${parent.port}/popup`, waitBudgetMs: 5_000 });
