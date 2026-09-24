@@ -5,18 +5,15 @@ const { name, version: targetVersion } = await Bun.file(new URL("./package.json"
 
 const spinner = ["|", "/", "-", "\\"];
 const registryUrl = `https://registry.npmjs.org/${encodeURIComponent(name)}/latest`;
+const refreshMs = 5_000;
 let publishedVersion = "unknown";
-let lastChecked = "never";
 let checkFailed = false;
 let frame = 0;
-
-function time(date: Date): string {
-  return date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })
-    .replace(" ", "").toLowerCase();
-}
+let refreshAt: number | null = null;
 
 function render(): void {
-  const status = `${spinner[frame++ % spinner.length]} Waiting v${publishedVersion} -> v${targetVersion} (last checked ${lastChecked})${checkFailed ? " [check failed]" : ""}`;
+  const refresh = refreshAt === null ? "refreshing..." : `refresh in ${Math.max(0, Math.ceil((refreshAt - Date.now()) / 1000))}s`;
+  const status = `${spinner[frame++ % spinner.length]} Waiting v${publishedVersion} -> v${targetVersion} (${refresh})${checkFailed ? " [check failed]" : ""}`;
   process.stdout.write(`\r\x1b[2K${status}`);
 }
 
@@ -26,9 +23,10 @@ process.once("SIGINT", () => {
   process.stdout.write("\n");
   process.exit(130);
 });
-render();
 
 for (;;) {
+  refreshAt = null;
+  render();
   try {
     const response = await fetch(registryUrl, { cache: "no-store", signal: AbortSignal.timeout(8_000) });
     if (!response.ok) throw new Error(`npm registry returned HTTP ${response.status}`);
@@ -39,11 +37,11 @@ for (;;) {
   } catch {
     checkFailed = true;
   }
-  lastChecked = time(new Date());
   if (publishedVersion === targetVersion && !checkFailed) break;
+  refreshAt = Date.now() + refreshMs;
   render();
-  await Bun.sleep(10_000);
+  await Bun.sleep(refreshMs);
 }
 
 clearInterval(animation);
-process.stdout.write(`\r\x1b[2K+ Published v${targetVersion} (last checked ${lastChecked})\n`);
+process.stdout.write(`\r\x1b[2K+ Published v${targetVersion}\n`);
