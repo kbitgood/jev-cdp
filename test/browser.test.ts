@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "../src/agent";
 import { Browser } from "../src/browser";
+import { CdpClient } from "../src/cdp";
 import { actionSpace } from "../src/model";
 
 const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -31,6 +32,7 @@ test("semantic frame readiness, duplicate links, overlays, and redirected popup"
     if (path === "/shadow-issue") return new Response('<nextjs-portal></nextjs-portal><script>document.querySelector("nextjs-portal").attachShadow({mode:"open"}).innerHTML=`<div style="position:fixed;bottom:0;left:0">1 Issue</div>`</script>', { headers: { "content-type": "text/html" } });
     if (path === "/console-errors") return new Response('<button onclick="console.error(\'step failure\');document.body.append(document.createElement(\'span\'));throw Error(\'uncaught step failure\')">Trigger error</button><script>console.error("initial failure")</script>', { headers: { "content-type": "text/html" } });
     if (path === "/frame-error-parent") return new Response(`<iframe src="http://127.0.0.1:${child.port}/frame-error"></iframe>`, { headers: { "content-type": "text/html" } });
+    if (path === "/hidden-frame") return new Response('<button>Continue</button><iframe id="toggle-frame" src="about:blank" style="display:none"></iframe>', { headers: { "content-type": "text/html" } });
     return new Response(`<a href="/class">Class</a><p>Loading class</p><iframe title="Lesson" src="http://127.0.0.1:${child.port}/slow" style="width:600px;height:300px"></iframe>`, { headers: { "content-type": "text/html" } });
   } });
   parentPort = parent.port ?? 0;
@@ -68,6 +70,46 @@ test("semantic frame readiness, duplicate links, overlays, and redirected popup"
     expect(nested.frames).toHaveLength(3);
     expect(nested.actions.some(action => action.label === "Deep class" && action.frameId === nested.frames[2]?.id)).toBe(true);
     expect(await browser.fresh(nested)).toBe(true);
+    await browser.close(); browser = undefined;
+
+    browser = await Browser.open({ cdpUrl, url: `http://127.0.0.1:${parent.port}/hidden-frame`, waitBudgetMs: 5_000 });
+    const hiddenFrame = await browser.observe();
+    expect(hiddenFrame.frames).toHaveLength(2);
+    expect(hiddenFrame.actions.some(action => action.label === "Continue")).toBe(true);
+    expect(await browser.fresh(hiddenFrame)).toBe(true);
+    await browser.evaluate('document.querySelector("#toggle-frame").style.display = "block"');
+    expect(await browser.fresh(hiddenFrame)).toBe(false);
+    const visibleFrame = await browser.observe();
+    expect(await browser.fresh(visibleFrame)).toBe(true);
+    await browser.evaluate('document.querySelector("#toggle-frame").style.display = "none"');
+    expect(await browser.fresh(visibleFrame)).toBe(false);
+    expect(await browser.fresh(hiddenFrame)).toBe(true);
+    await browser.evaluate('document.querySelector("#toggle-frame").style.display = "block"');
+    const beforeDetach = await browser.observe();
+    await browser.evaluate('document.querySelector("#toggle-frame").remove()');
+    expect(await browser.fresh(beforeDetach)).toBe(false);
+    await browser.evaluate('document.body.insertAdjacentHTML("beforeend", \'<iframe id="toggle-frame" src="about:blank" style="display:none"></iframe>\')');
+    await browser.evaluate('document.querySelector("#toggle-frame").style.display = "block"');
+    const beforeNavigation = await browser.observe();
+    await browser.evaluate('document.querySelector("#toggle-frame").src = "/destination"');
+    expect(await browser.fresh(beforeNavigation)).toBe(false);
+    await browser.evaluate('document.querySelector("#toggle-frame").style.display = "none"');
+    const beforeEvaluationFailure = await browser.observe();
+    await browser.evaluate('document.querySelector("#toggle-frame").style.display = "block"');
+    const originalCommand = CdpClient.prototype.command;
+    let injectedFailure = false;
+    CdpClient.prototype.command = function <T extends object = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}, sessionId?: string, timeoutMs?: number): Promise<T> {
+      if (method === "Runtime.evaluate" && "contextId" in params && String(params.expression).includes("const state=")) {
+        injectedFailure = true;
+        return Promise.reject(new Error("Frame changed during evaluation"));
+      }
+      return originalCommand.call(this, method, params, sessionId, timeoutMs) as Promise<T>;
+    };
+    try {
+      expect(await browser.fresh(beforeEvaluationFailure)).toBe(false);
+      expect(injectedFailure).toBe(true);
+    }
+    finally { CdpClient.prototype.command = originalCommand; }
     await browser.close(); browser = undefined;
 
     agent = await Agent.create({ cdpUrl, url: `http://127.0.0.1:${parent.port}/async-parent`, goal: "Open class", maxSteps: 1, waitBudgetMs: 2_000 });

@@ -879,10 +879,20 @@ export class Browser {
       return stableStringify(current) === stableStringify([page.page_key, page.guards[String(action.node)]]);
     }
     let marker = await this.evaluate<JsonValue>(MARKER);
-    for (const frame of (await this.frameStates()).filter(item => item.parentId !== null)) {
+    const frames = await this.frameStates();
+    for (const frame of frames.filter(item => item.parentId !== null)) {
+      try {
+        // Observe omits frames without a screen box (for example, a hidden about:blank iframe).
+        // Freshness must use the same visible frame set or it will retry every decision forever.
+        await this.frameScreenOffset(frame.id, frames);
+      } catch (error) {
+        if (error instanceof Error && error.message === "CDP -32000: Could not compute box model.") continue;
+        return false;
+      }
       try {
         const childMarker = await this.evaluateFrame<JsonValue>(frame.id, MARKER);
-        if (childMarker !== undefined) marker = [marker ?? null, frame.id, childMarker];
+        if (childMarker === undefined) return false;
+        marker = [marker ?? null, frame.id, childMarker];
       } catch { return false; }
     }
     return stableStringify(marker) === stableStringify(page.marker);
