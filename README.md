@@ -27,8 +27,8 @@ This is an early experimental port. See [NOTICE.md](NOTICE.md) for source attrib
 Run the published CLI without adding it to a project. Bun must be installed for either command:
 
 ```bash
-bunx jev-cdp@0.1.8 help run
-npx -y jev-cdp@0.1.8 help run
+bunx jev-cdp@0.1.9 help run
+npx -y jev-cdp@0.1.9 help run
 ```
 
 Chrome with a CDP endpoint and `TYPESAFE_API_KEY` are required for browser runs. FFmpeg with H.264 encoding (`libx264`) is required for `--recording`. Jev selects `-fps_mode vfr` when FFmpeg supports it and falls back to `-vsync vfr` for older builds. Run `jev-cdp doctor` to check the installed encoder with a short MP4 encode and decode.

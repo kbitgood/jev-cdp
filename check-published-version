@@ -1,0 +1,49 @@
+const { name, version: targetVersion } = await Bun.file(new URL("./package.json", import.meta.url)).json() as {
+  name: string;
+  version: string;
+};
+
+const spinner = ["|", "/", "-", "\\"];
+const registryUrl = `https://registry.npmjs.org/${encodeURIComponent(name)}/latest`;
+let publishedVersion = "unknown";
+let lastChecked = "never";
+let checkFailed = false;
+let frame = 0;
+
+function time(date: Date): string {
+  return date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })
+    .replace(" ", "").toLowerCase();
+}
+
+function render(): void {
+  const status = `${spinner[frame++ % spinner.length]} Waiting v${publishedVersion} -> v${targetVersion} (last checked ${lastChecked})${checkFailed ? " [check failed]" : ""}`;
+  process.stdout.write(`\r\x1b[2K${status}`);
+}
+
+const animation = setInterval(render, 120);
+process.once("SIGINT", () => {
+  clearInterval(animation);
+  process.stdout.write("\n");
+  process.exit(130);
+});
+render();
+
+for (;;) {
+  try {
+    const response = await fetch(registryUrl, { cache: "no-store", signal: AbortSignal.timeout(8_000) });
+    if (!response.ok) throw new Error(`npm registry returned HTTP ${response.status}`);
+    const result = await response.json() as { version?: unknown };
+    if (typeof result.version !== "string") throw new Error("npm registry returned no version");
+    publishedVersion = result.version;
+    checkFailed = false;
+  } catch {
+    checkFailed = true;
+  }
+  lastChecked = time(new Date());
+  if (publishedVersion === targetVersion && !checkFailed) break;
+  render();
+  await Bun.sleep(10_000);
+}
+
+clearInterval(animation);
+process.stdout.write(`\r\x1b[2K+ Published v${targetVersion} (last checked ${lastChecked})\n`);
