@@ -299,7 +299,7 @@ export function actionEvent(entry: HistoryEntry, maxSteps: number) {
       element: entry.element,
       ...(entry.kind === "fill" ? { text: entry.text, redacted: entry.redacted } : {}),
       ...(entry.kind === "select" ? { optionValue: entry.value } : {}),
-      ...(entry.kind === "scroll" ? { deltaY: entry.delta_y, point: { x: 550, y: 650 } } : {}),
+      ...(entry.kind === "scroll" ? { deltaY: entry.delta_y, point: entry.scroll_point ?? { x: 550, y: 650 } } : {}),
       ...(entry.kind === "wait" ? { durationMs: 100 } : {}),
     },
   };
