@@ -925,18 +925,44 @@ export class Browser {
     return details;
   }
 
-  async act(action: BrowserAction, page: PageState, text?: string): Promise<{ element: ReplayElement | null; performedAt: number }> {
+  async act(action: BrowserAction, page: PageState, text?: string): Promise<{
+    element: ReplayElement | null;
+    performedAt: number;
+    scrollPoint?: { x: number; y: number };
+  }> {
     if (!(await this.fresh(page, action))) throw new StalePageError("Page changed since this decision");
     if (action.kind === "wait") {
       await Bun.sleep(100);
       return { element: null, performedAt: performance.now() };
     }
     if (action.kind === "scroll") {
-      await this.animateCursor(550, 650);
+      let point = { x: 550, y: 650 };
+      if (typeof action.node === "number") {
+        const expression = `window.__jevFast?.scrollPoint(
+          window.__jevFast.nodes.get(${action.node}),
+          ${action.delta ?? 0}
+        )`;
+        const target = action.frameId
+          ? await this.evaluateFrame<{ x: number; y: number } | null>(action.frameId, expression)
+          : await this.evaluate<{ x: number; y: number } | null>(expression);
+        if (!target) throw new StalePageError("Scroll target changed or is covered");
+        point = target;
+        if (action.frameId) {
+          const offset = await this.frameScreenOffset(action.frameId);
+          point.x += offset.x;
+          point.y += offset.y;
+          const covered = await this.evaluate<boolean>(`(() => {
+            const e = document.elementFromPoint(${point.x}, ${point.y});
+            return !e || e.tagName !== "IFRAME";
+          })()`);
+          if (covered) throw new StalePageError("Scroll target is covered");
+        }
+      }
+      await this.animateCursor(point.x, point.y);
       await this.call("Input.dispatchMouseEvent", {
-        type: "mouseWheel", x: 550, y: 650, deltaX: 0, deltaY: action.delta ?? 0,
+        type: "mouseWheel", ...point, deltaX: 0, deltaY: action.delta ?? 0,
       });
-      return { element: null, performedAt: performance.now() };
+      return { element: null, performedAt: performance.now(), scrollPoint: point };
     }
     if (typeof action.node !== "number") throw new Error("Invalid observed node");
     const details = await this.describeElement(action);

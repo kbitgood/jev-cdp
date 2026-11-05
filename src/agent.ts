@@ -207,7 +207,7 @@ export class Agent {
     }
     await this.#browser.waitForInteractionPause();
     const fromTargetId = this.#browser.targetId;
-    const { element, performedAt } = await this.#browser.act(action, page, text ?? undefined);
+    const { element, performedAt, scrollPoint } = await this.#browser.act(action, page, text ?? undefined);
     this.#pendingText = null;
     const entry: HistoryEntry = {
       step: this.#history.length + 1,
@@ -231,6 +231,7 @@ export class Agent {
       element,
       value: action.kind === "select" ? action.value ?? null : null,
       delta_y: action.kind === "scroll" ? action.delta ?? 0 : null,
+      scroll_point: scrollPoint ?? null,
       redacted: action.kind === "fill" && (Boolean(action.sensitive) || this.#sensitiveFieldLabels.has(action.label)),
       usage: decision.usage,
       executed_ms: Math.round(performedAt - this.#startedAt!),

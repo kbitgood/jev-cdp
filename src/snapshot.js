@@ -44,16 +44,70 @@
     }
     return null;
   };
+  const scrollContainers = () =>
+    [...document.querySelectorAll('*')].filter(e =>
+      e !== document.scrollingElement &&
+      visible(e) &&
+      /^(auto|scroll)$/.test(getComputedStyle(e).overflowY) &&
+      e.clientHeight > 0 &&
+      e.scrollHeight > e.clientHeight + 2
+    );
+  cache.scrollPoint = (e, delta) => {
+    if (!e?.isConnected || !visible(e)) return null;
+    if (delta > 0
+      ? e.scrollTop + e.clientHeight >= e.scrollHeight - 2
+      : e.scrollTop <= 0) return null;
+    const r = e.getBoundingClientRect();
+    let left = Math.max(0, r.left);
+    let right = Math.min(innerWidth, r.right);
+    let top = Math.max(0, r.top);
+    let bottom = Math.min(innerHeight, r.bottom);
+    for (let p = e.parentElement; p; p = p.parentElement) {
+      if (p === document.body || p === document.documentElement) continue;
+      const style = getComputedStyle(p);
+      const bounds = p.getBoundingClientRect();
+      if (/^(auto|scroll|hidden|clip)$/.test(style.overflowX)) {
+        left = Math.max(left, bounds.left);
+        right = Math.min(right, bounds.right);
+      }
+      if (/^(auto|scroll|hidden|clip)$/.test(style.overflowY)) {
+        top = Math.max(top, bounds.top);
+        bottom = Math.min(bottom, bounds.bottom);
+      }
+    }
+    if (right - left < 4 || bottom - top < 4) return null;
+    for (const fraction of [0.5, 0.9, 0.1]) {
+      const point = {
+        x: left + (right - left) * fraction,
+        y: top + (bottom - top) / 2,
+      };
+      let hit = document.elementFromPoint(point.x, point.y);
+      if (!hit || !e.contains(hit)) continue;
+      while (hit && hit !== e) {
+        if (
+          /^(auto|scroll)$/.test(getComputedStyle(hit).overflowY) &&
+          hit.scrollHeight > hit.clientHeight + 2
+        ) break;
+        hit = hit.parentElement;
+      }
+      if (hit === e) return point;
+    }
+    return null;
+  };
   cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     [...document.querySelectorAll('input,textarea,select')].filter(safe)
-      .map(e=>[identity(e),stateValue(e),e.checked,e.selectedIndex,e.disabled,e.readOnly])];
+      .map(e=>[identity(e),stateValue(e),e.checked,e.selectedIndex,e.disabled,e.readOnly]),
+    scrollContainers().map(e=>[
+      identity(e),e.scrollTop,e.scrollLeft,e.clientHeight,e.scrollHeight
+    ])];
   cache.guard=e=>{
     if (!e?.isConnected || !visible(e)) return null;
     const scope=e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
     return [identity(e),role(e),name(e),sensitive(e)?Boolean(e.value):e.value??null,e.checked??null,e.selectedIndex??null,
       e.readOnly??null,e.matches(':disabled'),e.getAttribute('aria-disabled'),
       e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
-      e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
+      e.getAttribute('href'),scope?.innerText?.slice(0,6000)||'',
+      e.scrollTop,e.scrollLeft,e.clientHeight,e.scrollHeight];
   };
   const actions=[];
   for (const e of document.querySelectorAll(selector)) {
@@ -105,12 +159,35 @@
       }
     }
   }
+  for (const e of scrollContainers()) {
+    const label =
+      e.getAttribute('aria-label') ||
+      e.closest('form,dialog,[role="dialog"]')
+        ?.querySelector('h1,h2,h3')?.textContent ||
+      'panel';
+    for (const delta of [560, -560]) {
+      const point = cache.scrollPoint(e, delta);
+      if (!point) continue;
+      actions.push({
+        kind: 'scroll',
+        node: identity(e),
+        label: 'Scroll ' + (delta > 0 ? 'down' : 'up') +
+          ' in ' + label.trim().slice(0, 80),
+        delta,
+        point,
+        rect: { x: point.x - 1, y: point.y - 1, w: 2, h: 2 },
+        clickable: true,
+        coveredBy: null,
+        scrollTop: e.scrollTop,
+      });
+    }
+  }
   const text=words.join('\n').slice(0,6000), height=document.documentElement.scrollHeight;
   const page_key=cache.pageKey(), guards={};
   for (const a of actions) if (!(a.node in guards)) guards[a.node]=cache.guard(cache.nodes.get(a.node));
   const semantics=actions.map(({rect,...action})=>action);
   const marker=[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
-    document.title,text,semantics,page_key[6]];
+    document.title,text,semantics,page_key[6],page_key[7]];
   const omitted_actions=Math.max(0,actions.length-250);
   actions.splice(250);
   actions.forEach((a,i)=>a.id='e'+(i+1));

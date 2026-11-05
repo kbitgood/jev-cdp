@@ -18,6 +18,8 @@ export interface BrowserAction {
   pressed?: string | boolean;
   sensitive?: boolean;
   delta?: number;
+  point?: { x: number; y: number };
+  scrollTop?: number;
   rect?: { x: number; y: number; w: number; h: number };
   frameUrl?: string;
   nearbyText?: string;
@@ -140,6 +142,7 @@ export interface HistoryEntry {
   element: ReplayElement | null;
   value: string | null;
   delta_y: number | null;
+  scroll_point?: { x: number; y: number } | null;
   redacted: boolean;
   usage: Record<string, number>;
   executed_ms: number;
